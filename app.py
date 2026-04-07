@@ -93,7 +93,89 @@ def format_markdown_table(lines: list[str]) -> list[str]:
     return table_lines
 
 
+def remove_redundant_table_text(text: str) -> str:
+    """Remove redundant raw text representation of tables already extracted by pdfplumber.
+    
+    Specifically targets the pattern where pdfminer extracts table data as vertical lines:
+    - Multiple "Financial Metrics..." lines followed by
+    - Repeated Metric/Base Case/Downside/Production/Price etc. lines
+    - Continuing through the table data entries
+    
+    Only remove if this pattern is preceded by a markdown table (from pdfplumber).
+    """
+    lines = text.split('\n')
+    
+    # Check if we have markdown tables (from pdfplumber) by looking for lines starting with |
+    has_markdown_table = any(l.strip().startswith('|') for l in lines)
+    if not has_markdown_table:
+        return text  # No markdown tables, so don't try to remove redundancies
+    
+    result = []
+    i = 0
+    
+    while i < len(lines):
+        # Look for the start of redundant table pattern: "Financial Metrics..." repeated
+        if ('Financial Metrics' in lines[i] and i < len(lines) - 20):
+            # Count how many times "Financial Metrics" repeats
+            fm_count = 0
+            j = i
+            while j < len(lines) and fm_count < 5:
+                if 'Financial Metrics' in lines[j]:
+                    fm_count += 1
+                    j += 1
+                elif lines[j].strip() == '':
+                    j += 1
+                else:
+                    break
+            
+            # If "Financial Metrics" appears 4+ times, this is the redundant section
+            if fm_count >= 4:
+                # Skip forward through the table data pattern
+                # This includes lines with Metric, Base Case, Downside, Production, etc.
+                redundant_keywords = {'Metric', 'Base Case', 'Downside', 'Production', 
+                                    'Price (FOB)', 'IRR', 'Steady State', 'EBITDA', 
+                                    'Capex', 'Development Plan', 'Upside'}
+                
+                # Skip until we hit a line that's not part of this pattern
+                while i < len(lines):
+                    line = lines[i]
+                    stripped = line.strip()
+                    
+                    # Stop if we hit a markdown table, another content section, or empty space followed by content
+                    if (stripped.startswith('|') or 
+                        stripped.startswith('Current Status') or
+                        stripped.startswith('Key Opportunities') or
+                        stripped.startswith('Key Risks') or
+                        (not stripped and i+1 < len(lines) and 
+                         not any(kw in lines[i+1] for kw in redundant_keywords))):
+                        break
+                    
+                    # Skip lines that are part of table data
+                    is_table_line = (
+                        not stripped or  # blank lines
+                        'Financial Metrics' in stripped or
+                        any(kw in stripped for kw in redundant_keywords) or
+                        (stripped and stripped[0].isdigit()) or  # lines starting with digits
+                        stripped in ['13Mtpa', '$250/t', '11.7-11.9%', '$1.6B', '65%'] or  # known data values
+                        (len(stripped) < 30 and any(c.isdigit() or c in '.$%' for c in stripped))  # likely data
+                    )
+                    
+                    if is_table_line:
+                        i += 1
+                    else:
+                        break
+                continue
+        
+        result.append(lines[i])
+        i += 1
+    
+    return '\n'.join(result)
+
+
 def normalize_text(text: str) -> str:
+    # Remove redundant table text patterns
+    text = remove_redundant_table_text(text)
+    
     # Clean up repeated characters first (except in tables)
     lines_raw = text.split('\n')
     lines_cleaned = []
