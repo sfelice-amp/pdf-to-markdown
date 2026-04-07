@@ -6,6 +6,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request
 from werkzeug.utils import secure_filename
 import mammoth
+import pdfplumber
 from pdfminer.high_level import extract_text
 from pdf2image import convert_from_path
 import pytesseract
@@ -21,12 +22,16 @@ def allowed_file(filename: str) -> bool:
 
 
 def split_table_line(line: str) -> list[str]:
-    cells = re.split(r"\t| {2,}", line.strip())
-    return [cell.strip() for cell in cells if cell.strip()]
+    # Split on tabs or 2+ spaces, but also handle cases with single spaces if aligned
+    cells = re.split(r'\t| {2,}', line.strip())
+    # Filter out empty cells and strip
+    cells = [cell.strip() for cell in cells if cell.strip()]
+    return cells
 
 
 def is_table_line(line: str) -> bool:
-    return len(split_table_line(line)) >= 2 and re.search(r"\t| {2,}", line) is not None
+    cells = split_table_line(line)
+    return len(cells) >= 2
 
 
 def is_table_block(lines: list[str]) -> bool:
@@ -34,22 +39,56 @@ def is_table_block(lines: list[str]) -> bool:
         return False
 
     rows = [split_table_line(line) for line in lines]
-    if any(len(row) < 2 for row in rows):
+    # Count column lengths
+    col_counts = [len(row) for row in rows if len(row) >= 2]
+    if len(col_counts) < len(rows) * 0.5:  # At least 50% of lines must be table-like
         return False
 
-    return len({len(row) for row in rows}) == 1
+    # Find the most common column count
+    from collections import Counter
+    most_common = Counter(col_counts).most_common(1)
+    if not most_common:
+        return False
+    target_cols = most_common[0][0]
+    # Allow rows with target_cols or target_cols-1 (for merged cells)
+    valid_rows = [row for row in rows if len(row) in (target_cols, target_cols - 1)]
+    return len(valid_rows) >= len(rows) * 0.8  # At least 80% valid
 
 
 def format_markdown_table(lines: list[str]) -> list[str]:
     rows = [split_table_line(line) for line in lines]
-    col_count = len(rows[0])
-    header = rows[0] + [""] * (col_count - len(rows[0]))
-    separator = ["---"] * col_count
+    # Filter to valid rows
+    col_counts = [len(row) for row in rows]
+    from collections import Counter
+    target_cols = Counter(col_counts).most_common(1)[0][0]
+    valid_rows = [row for row in rows if len(row) in (target_cols, target_cols - 1)]
+    
+    if not valid_rows:
+        return lines  # Fallback
 
-    table_lines = ["| " + " | ".join(header) + " |", "| " + " | ".join(separator) + " |"]
-    for row in rows[1:]:
-        padded = row + [""] * (col_count - len(row))
-        table_lines.append("| " + " | ".join(padded) + " |")
+    # Pad rows to target_cols
+    padded_rows = []
+    for row in valid_rows:
+        if len(row) == target_cols - 1:
+            row.append("")  # Add empty cell for merged
+        padded_rows.append(row[:target_cols])  # Truncate if more
+
+    # Assume first row is header if it looks like it (no numbers, short)
+    first_row = padded_rows[0]
+    is_header = not any(re.search(r'\d', cell) for cell in first_row) and all(len(cell) < 50 for cell in first_row)
+    
+    table_lines = []
+    if is_header:
+        header = first_row
+        separator = ["---"] * len(header)
+        table_lines.append("| " + " | ".join(header) + " |")
+        table_lines.append("| " + " | ".join(separator) + " |")
+        data_rows = padded_rows[1:]
+    else:
+        data_rows = padded_rows
+
+    for row in data_rows:
+        table_lines.append("| " + " | ".join(row) + " |")
 
     return table_lines
 
@@ -110,11 +149,94 @@ def pdf_has_text(text: str) -> bool:
     return len(words) >= 30
 
 
+def deduplicate_repeated_chars(text: str) -> str:
+    """Remove repeated characters that PDFs sometimes include.
+    Only removes runs of 3+ identical characters (keeps legitimate double chars like '00' in '200')."""
+    if not text:
+        return text
+    result = []
+    i = 0
+    while i < len(text):
+        char = text[i]
+        count = 1
+        # Count consecutive identical characters
+        while i + count < len(text) and text[i + count] == char:
+            count += 1
+        # Keep only one copy if count > 2; otherwise keep all
+        if count > 2:
+            result.append(char)
+        else:
+            result.extend([char] * count)
+        i += count
+    return ''.join(result)
+
+
+def extract_tables_from_pdf(path: Path) -> list[list[list[str]]]:
+    """Extract tables from PDF using pdfplumber for better structure preservation."""
+    tables = []
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            for page in pdf.pages:
+                page_tables = page.extract_tables()
+                if page_tables:
+                    tables.extend(page_tables)
+    except Exception:
+        pass
+    return tables
+
+
+def tables_to_markdown(tables: list[list[list[str]]]) -> str:
+    """Convert extracted tables to markdown format."""
+    if not tables:
+        return ""
+    
+    markdown_tables = []
+    for table in tables:
+        if not table or len(table) < 2:
+            continue
+        
+        # Filter out empty rows
+        table = [row for row in table if any(cell and str(cell).strip() for cell in row)]
+        if len(table) < 2:
+            continue
+        
+        header = table[0]
+        # Clean up repeated characters and format header
+        clean_header = [deduplicate_repeated_chars(str(cell or "").strip()) for cell in header]
+        markdown_rows = ["| " + " | ".join(clean_header) + " |"]
+        markdown_rows.append("| " + " | ".join(["---"] * len(header)) + " |")
+        
+        for row in table[1:]:
+            padded_row = row + [""] * (len(header) - len(row))
+            clean_row = [deduplicate_repeated_chars(str(cell or "").strip()) for cell in padded_row[:len(header)]]
+            markdown_rows.append("| " + " | ".join(clean_row) + " |")
+        
+        markdown_tables.append("\n".join(markdown_rows))
+    
+    return "\n\n".join(markdown_tables)
+
+
 def extract_pdf_text(path: Path) -> str:
     try:
+        # First try to extract tables using pdfplumber for better structure
+        tables = extract_tables_from_pdf(path)
         text = extract_text(str(path)) or ""
+        
+        # If tables were found, insert them at a reasonable point in the text
+        if tables:
+            markdown_tables = tables_to_markdown(tables)
+            # Insert tables after the first substantial content block
+            lines = text.split('\n\n')
+            if len(lines) > 2:
+                text = '\n\n'.join(lines[:2]) + '\n\n' + markdown_tables + '\n\n' + '\n\n'.join(lines[2:])
+            else:
+                text = text + '\n\n' + markdown_tables
     except Exception:
-        return ""
+        try:
+            text = extract_text(str(path)) or ""
+        except Exception:
+            return ""
+    
     return text
 
 
