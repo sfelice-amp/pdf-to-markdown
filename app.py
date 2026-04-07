@@ -10,7 +10,9 @@ from pdfminer.high_level import extract_text
 from pdf2image import convert_from_path
 import pytesseract
 
-app = Flask(__name__, template_folder="templates")
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+app = Flask(__name__, template_folder=str(TEMPLATES_DIR))
 ALLOWED_EXTENSIONS = {"pdf", "docx"}
 
 
@@ -18,9 +20,43 @@ def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def split_table_line(line: str) -> list[str]:
+    cells = re.split(r"\t| {2,}", line.strip())
+    return [cell.strip() for cell in cells if cell.strip()]
+
+
+def is_table_line(line: str) -> bool:
+    return len(split_table_line(line)) >= 2 and re.search(r"\t| {2,}", line) is not None
+
+
+def is_table_block(lines: list[str]) -> bool:
+    if len(lines) < 2:
+        return False
+
+    rows = [split_table_line(line) for line in lines]
+    if any(len(row) < 2 for row in rows):
+        return False
+
+    return len({len(row) for row in rows}) == 1
+
+
+def format_markdown_table(lines: list[str]) -> list[str]:
+    rows = [split_table_line(line) for line in lines]
+    col_count = len(rows[0])
+    header = rows[0] + [""] * (col_count - len(rows[0]))
+    separator = ["---"] * col_count
+
+    table_lines = ["| " + " | ".join(header) + " |", "| " + " | ".join(separator) + " |"]
+    for row in rows[1:]:
+        padded = row + [""] * (col_count - len(row))
+        table_lines.append("| " + " | ".join(padded) + " |")
+
+    return table_lines
+
+
 def normalize_text(text: str) -> str:
     text = text.replace("ﬁ", "fi").replace("ﬂ", "fl").replace("ﬀ", "ff").replace("ﬃ", "ffi").replace("ﬄ", "ffl")
-    text = text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+    text = text.replace("“", '"').replace("”", '"').replace("‘", "'" ).replace("’", "'")
     text = text.replace("–", "-").replace("—", "-").replace("…", "...")
 
     text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
@@ -36,8 +72,34 @@ def normalize_text(text: str) -> str:
         lines.append(line)
         previous = line
 
-    paragraph_text = "\n".join(lines)
-    paragraph_text = re.sub(r"(?<!\n)\n(?!\n)", " ", paragraph_text)
+    blocks: list[list[str] | str] = []
+    buffer: list[str] = []
+
+    for line in lines:
+        if line.strip() == "":
+            if buffer:
+                blocks.append(buffer)
+                buffer = []
+            blocks.append("")
+        else:
+            buffer.append(line)
+
+    if buffer:
+        blocks.append(buffer)
+
+    formatted_blocks: list[str] = []
+    for block in blocks:
+        if block == "":
+            formatted_blocks.append("")
+            continue
+
+        if is_table_block(block):
+            formatted_blocks.extend(format_markdown_table(block))
+        else:
+            merged = " ".join(line for line in block if line.strip())
+            formatted_blocks.append(merged)
+
+    paragraph_text = "\n\n".join(formatted_blocks)
     paragraph_text = re.sub(r"\n{3,}", "\n\n", paragraph_text)
 
     return paragraph_text.strip()
@@ -87,11 +149,11 @@ def convert_docx(path: Path) -> str:
     return markdown
 
 
-def convert_pdf(path: Path) -> str:
+def convert_pdf(path: Path) -> tuple[str, str]:
     text = extract_pdf_text(path)
     if pdf_has_text(text):
-        return text
-    return ocr_pdf(path)
+        return text, "Embedded text"
+    return ocr_pdf(path), "OCR"
 
 
 @app.route("/")
@@ -120,15 +182,25 @@ def convert_file():
 
         try:
             if suffix == ".pdf":
-                raw_text = convert_pdf(temp_path)
+                raw_text, source_type = convert_pdf(temp_path)
             else:
                 raw_text = convert_docx(temp_path)
+                source_type = "DOCX"
         except Exception as exc:
             return jsonify(error=f"Conversion failed: {str(exc)}"), 500
 
     cleaned = normalize_text(raw_text)
-    return jsonify(text=cleaned, filename=f"{Path(filename).stem}.md")
+    return jsonify(text=cleaned, filename=f"{Path(filename).stem}.md", source_type=source_type)
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    import sys
+
+    port = 5000
+    if len(sys.argv) > 1:
+        try:
+            port = int(sys.argv[1])
+        except ValueError:
+            pass
+
+    app.run(host="127.0.0.1", port=port, debug=True)
