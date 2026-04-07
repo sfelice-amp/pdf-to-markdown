@@ -23,11 +23,39 @@ ALLOWED_EXTENSIONS = {"pdf", "docx"}
 # Font-aware line extraction for heading / paragraph detection
 # ---------------------------------------------------------------------------
 
+def _dedup_overlapping_chars(line_chars: list[dict]) -> tuple[list[dict], list[bool]]:
+    """Remove overlapping chars (same position) and track which are bold-via-overlap.
+
+    Some PDFs render bold by printing each character multiple times at the same
+    x-position. Returns deduplicated chars and a per-char bold flag.
+    """
+    if not line_chars:
+        return [], []
+
+    deduped: list[dict] = []
+    bold_flags: list[bool] = []
+    i = 0
+    while i < len(line_chars):
+        c = line_chars[i]
+        # Count how many subsequent chars overlap at same x (within 0.5pt)
+        overlap_count = 1
+        while (i + overlap_count < len(line_chars)
+               and abs(line_chars[i + overlap_count]['x0'] - c['x0']) < 0.5
+               and line_chars[i + overlap_count]['text'] == c['text']):
+            overlap_count += 1
+        deduped.append(c)
+        bold_flags.append(overlap_count >= 2)
+        i += overlap_count
+
+    return deduped, bold_flags
+
+
 def extract_lines_with_metadata(chars: list[dict], bbox: tuple | None = None) -> list[dict]:
     """Group page.chars into lines with font metadata.
 
-    Each returned dict has keys: text, top, fonts (list of (fontname, size, text)
-    spans), dominant_font, dominant_size, is_bold, is_italic.
+    Each returned dict has keys: text, top, spans, dominant_font, dominant_size,
+    is_bold, is_italic, x0 (left position), has_overlap_bold.
+    Detects bold-via-font and bold-via-overlapping-chars (common in email PDFs).
     """
     if bbox:
         x0, y0, x1, y1 = bbox
@@ -58,33 +86,60 @@ def extract_lines_with_metadata(chars: list[dict], bbox: tuple | None = None) ->
     result = []
     for line_chars in lines:
         line_chars.sort(key=lambda c: c['x0'])
-        text = ''.join(c['text'] for c in line_chars).strip()
+
+        # Deduplicate overlapping chars and detect bold-via-overlap
+        deduped, bold_flags = _dedup_overlapping_chars(line_chars)
+
+        text = ''.join(c['text'] for c in deduped).strip()
+        # Also apply character-run deduplication (e.g. remaining "SSSS" → "S")
+        text = deduplicate_repeated_chars(text)
         if not text:
             continue
 
-        # Build font spans
+        # Track how much of the line is bold-via-overlap
+        non_space_bold = sum(1 for c, b in zip(deduped, bold_flags)
+                            if b and c['text'].strip())
+        non_space_total = sum(1 for c in deduped if c['text'].strip())
+        overlap_bold_ratio = non_space_bold / non_space_total if non_space_total else 0
+
+        # Build font spans (from deduped chars) with bold-via-overlap info
         spans = []
         current_span_font = None
         current_span_size = None
-        current_span_text = []
-        for c in line_chars:
+        current_span_bold_overlap = None
+        current_span_text: list[str] = []
+        for c, is_overlap_bold in zip(deduped, bold_flags):
             fn = c.get('fontname', '')
             sz = round(c['size'], 1)
-            if fn != current_span_font or sz != current_span_size:
+            if (fn != current_span_font or sz != current_span_size
+                    or is_overlap_bold != current_span_bold_overlap):
                 if current_span_text:
-                    spans.append((current_span_font, current_span_size, ''.join(current_span_text)))
+                    raw = ''.join(current_span_text)
+                    clean = deduplicate_repeated_chars(raw)
+                    effective_bold = (current_span_bold_overlap
+                                     or 'Bold' in (current_span_font or '')
+                                     or 'bold' in (current_span_font or ''))
+                    spans.append((current_span_font, current_span_size,
+                                  clean, effective_bold))
                 current_span_font = fn
                 current_span_size = sz
+                current_span_bold_overlap = is_overlap_bold
                 current_span_text = [c['text']]
             else:
                 current_span_text.append(c['text'])
         if current_span_text:
-            spans.append((current_span_font, current_span_size, ''.join(current_span_text)))
+            raw = ''.join(current_span_text)
+            clean = deduplicate_repeated_chars(raw)
+            effective_bold = (current_span_bold_overlap
+                              or 'Bold' in (current_span_font or '')
+                              or 'bold' in (current_span_font or ''))
+            spans.append((current_span_font, current_span_size,
+                          clean, effective_bold))
 
         # Determine dominant font (by char count, ignoring whitespace)
         from collections import Counter
         font_counts: Counter = Counter()
-        for fn, sz, span_text in spans:
+        for fn, sz, span_text, _ in spans:
             count = len(span_text.replace(' ', ''))
             if count > 0:
                 font_counts[(fn, sz)] += count
@@ -92,17 +147,23 @@ def extract_lines_with_metadata(chars: list[dict], bbox: tuple | None = None) ->
             continue
         dominant_font, dominant_size = font_counts.most_common(1)[0][0]
 
-        is_bold = 'Bold' in dominant_font or 'bold' in dominant_font
+        is_bold_font = 'Bold' in dominant_font or 'bold' in dominant_font
+        is_bold = is_bold_font or overlap_bold_ratio > 0.5
         is_italic = 'Italic' in dominant_font or 'italic' in dominant_font
+
+        # Record left margin position for bullet detection
+        line_x0 = deduped[0]['x0'] if deduped else 0
 
         result.append({
             'text': text,
             'top': line_chars[0]['top'],
+            'x0': line_x0,
             'spans': spans,
             'dominant_font': dominant_font,
             'dominant_size': dominant_size,
             'is_bold': is_bold,
             'is_italic': is_italic,
+            'has_overlap_bold': overlap_bold_ratio > 0.5,
         })
 
     return result
@@ -112,8 +173,9 @@ def classify_and_build_markdown(lines: list[dict]) -> str:
     """Classify lines as title/heading/body/boilerplate and build markdown.
 
     Uses font statistics to determine the body font, then classifies by
-    relative size and font family differences. Detects paragraph breaks
-    from vertical gaps between lines.
+    relative size, font family differences, and bold-via-overlap detection.
+    Detects paragraph breaks from vertical gaps, and bullet lists from
+    x-position indentation.
     """
     if not lines:
         return ""
@@ -134,7 +196,7 @@ def classify_and_build_markdown(lines: list[dict]) -> str:
     body_gaps = []
     prev_top = None
     for line in lines:
-        if line['dominant_size'] == body_size and abs(line['dominant_size'] - body_size) < 0.5:
+        if abs(line['dominant_size'] - body_size) < 0.5:
             if prev_top is not None:
                 gap = line['top'] - prev_top
                 if 0 < gap < 100:  # sanity bound
@@ -143,6 +205,20 @@ def classify_and_build_markdown(lines: list[dict]) -> str:
 
     median_gap = statistics.median(body_gaps) if body_gaps else 14.0
     para_break_threshold = median_gap * 1.8
+
+    # Determine left margin for bullet detection.
+    # Use the leftmost x0 position that has at least 2 lines at body-text size.
+    # This avoids page headers/footers at unusual positions skewing the margin,
+    # while correctly identifying the body left edge even when bullet items dominate.
+    body_line_x0s: list[float] = []
+    for line in lines:
+        if abs(line['dominant_size'] - body_size) < 1.0 and line['dominant_size'] > 1.0:
+            body_line_x0s.append(round(line['x0'], 0))
+    x0_counts: Counter = Counter(body_line_x0s)
+    # Take the leftmost x0 with at least 2 occurrences
+    qualified = sorted(x for x, cnt in x0_counts.items() if cnt >= 2)
+    left_margin = qualified[0] if qualified else (min(body_line_x0s) if body_line_x0s else 0)
+    bullet_indent_threshold = 10  # x0 must be >=10pt right of margin
 
     # Classify each line
     output_parts: list[str] = []
@@ -154,6 +230,7 @@ def classify_and_build_markdown(lines: list[dict]) -> str:
         text = line['text']
         is_bold = line['is_bold']
         is_sans = 'Sans' in font or 'Helvetica' in font or 'Arial' in font
+        line_x0 = line.get('x0', 0)
 
         # Skip boilerplate (page headers/footers in small font)
         if size < body_size * 0.85:
@@ -177,12 +254,19 @@ def classify_and_build_markdown(lines: list[dict]) -> str:
         if re.match(r'^.{0,30}(Preprints?|preprints?).{0,30}et\s+al', stripped_text):
             prev_top = line['top']
             continue
+        # Skip page numbers like "1 of 2", "Page 3 of 10"
+        if re.match(r'^(?:Page\s+)?\d+\s+of\s+\d+$', stripped_text, re.IGNORECASE):
+            prev_top = line['top']
+            continue
 
         # Detect paragraph break from vertical gap
         if prev_top is not None:
             gap = line['top'] - prev_top
             if gap > para_break_threshold:
                 output_parts.append('')  # blank line = paragraph break
+
+        # Check if this line is indented (potential bullet)
+        is_indented = (line_x0 - left_margin) >= bullet_indent_threshold
 
         # Classify heading level
         size_ratio = size / body_size if body_size > 0 else 1.0
@@ -193,10 +277,13 @@ def classify_and_build_markdown(lines: list[dict]) -> str:
         elif size_ratio > 1.1 or (is_bold and is_sans and body_is_serif):
             # Section heading
             output_parts.append(f'## {text}')
-        elif is_bold and text == text and len(text) < 80 and not any(c.isdigit() for c in text[-3:]):
+        elif is_indented:
+            # Indented line — bullet point (may be bold or regular)
+            formatted = _format_inline_spans(line['spans'], body_font, body_size)
+            output_parts.append(f'- {formatted}')
+        elif is_bold and len(text) < 80:
             # Check if this is a standalone bold line (potential subheading)
-            # Only treat as heading if the line is short and looks like a label
-            all_bold = all('Bold' in s[0] or 'bold' in s[0] for s in line['spans'] if s[2].strip())
+            all_bold = all(s[3] for s in line['spans'] if s[2].strip())
             if all_bold and len(text.split()) <= 10:
                 output_parts.append(f'### {text}')
             else:
@@ -210,30 +297,46 @@ def classify_and_build_markdown(lines: list[dict]) -> str:
 
         prev_top = line['top']
 
-    # Merge consecutive heading lines at the same level (multi-line titles)
+    # Post-processing: merge multi-line headings and bullet continuations
     merged = []
     for part in output_parts:
-        if merged and part.startswith('#'):
-            # Extract heading level and text
+        if not merged:
+            merged.append(part)
+            continue
+
+        # Merge consecutive heading lines at the same level (multi-line titles)
+        if part.startswith('#'):
             match_cur = re.match(r'^(#{1,6})\s+(.*)', part)
             match_prev = re.match(r'^(#{1,6})\s+(.*)', merged[-1])
             if match_cur and match_prev and match_cur.group(1) == match_prev.group(1):
-                # Same heading level — merge
                 merged[-1] = f'{match_prev.group(1)} {match_prev.group(2)} {match_cur.group(2)}'
                 continue
+
+        # Merge bullet continuation lines: if previous was a bullet and this is
+        # also a bullet but doesn't start with a bold label, it's a wrapped line
+        if (part.startswith('- ') and merged[-1].startswith('- ')
+                and not re.match(r'^- \*\*', part)
+                and not re.match(r'^- \d', part)):
+            # Continuation of previous bullet
+            merged[-1] = f'{merged[-1]} {part[2:]}'
+            continue
+
         merged.append(part)
 
     return '\n'.join(merged)
 
 
 def _format_inline_spans(spans: list[tuple], body_font: str, body_size: float) -> str:
-    """Format a line's font spans into markdown with **bold** and *italic*."""
+    """Format a line's font spans into markdown with **bold** and *italic*.
+
+    Spans are 4-tuples: (fontname, size, text, is_bold).
+    """
     parts = []
-    for font, size, text in spans:
+    for font, size, text, span_bold in spans:
         if not text.strip():
             parts.append(text)
             continue
-        is_bold = 'Bold' in font or 'bold' in font
+        is_bold = span_bold
         is_italic = 'Italic' in font or 'italic' in font
         # Only mark as bold/italic if different from body font
         body_is_bold = 'Bold' in body_font or 'bold' in body_font
@@ -580,6 +683,12 @@ def normalize_text(text: str) -> str:
             blocks.append(line)
         # Preserve markdown heading lines as standalone blocks
         elif re.match(r'^#{1,6}\s', stripped):
+            if buffer:
+                blocks.append(buffer)
+                buffer = []
+            blocks.append(line)
+        # Preserve markdown bullet lines as standalone blocks
+        elif stripped.startswith('- '):
             if buffer:
                 blocks.append(buffer)
                 buffer = []
