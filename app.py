@@ -183,11 +183,20 @@ def classify_and_build_markdown(lines: list[dict]) -> str:
     from collections import Counter
     import statistics
 
-    # Determine body font: most frequent (font, size) by char count
+    # Determine body font: most frequent (font, size >= 8pt) by char count.
+    # Exclude very small text (footers, legal, page numbers) from body detection.
     font_char_counts: Counter = Counter()
     for line in lines:
+        if line['dominant_size'] < 8.0:
+            continue
         count = len(line['text'].replace(' ', ''))
         font_char_counts[(line['dominant_font'], line['dominant_size'])] += count
+
+    if not font_char_counts:
+        # Fallback: include all sizes
+        for line in lines:
+            count = len(line['text'].replace(' ', ''))
+            font_char_counts[(line['dominant_font'], line['dominant_size'])] += count
 
     body_font, body_size = font_char_counts.most_common(1)[0][0]
     body_is_serif = 'Serif' in body_font or 'Times' in body_font or 'serif' in body_font
@@ -283,8 +292,19 @@ def classify_and_build_markdown(lines: list[dict]) -> str:
             output_parts.append(f'- {formatted}')
         elif is_bold and len(text) < 80:
             # Check if this is a standalone bold line (potential subheading)
+            # Must be: all bold, short, and not a sentence fragment
             all_bold = all(s[3] for s in line['spans'] if s[2].strip())
-            if all_bold and len(text.split()) <= 10:
+            looks_like_heading = (
+                all_bold
+                and len(text.split()) <= 12
+                and not text.rstrip().endswith(',')
+                and not text.rstrip().endswith(';')
+                # Don't treat as heading if it ends with lowercase + common
+                # sentence-continuation words, suggesting it's a wrapped sentence
+                and not re.search(r'\b(and|the|a|an|of|in|to|its|with|for|or)\s*$',
+                                  text.rstrip(), re.IGNORECASE)
+            )
+            if looks_like_heading:
                 output_parts.append(f'### {text}')
             else:
                 # Bold body text — wrap in **
@@ -431,11 +451,11 @@ def format_markdown_table(lines: list[str]) -> list[str]:
 
 
 def collapse_empty_columns(rows: list[list[str]]) -> list[list[str]]:
-    """Merge adjacent columns that never both have content in the same row.
+    """Merge adjacent columns that never both have *different* content in the same row.
 
     pdfplumber often creates offset column grids where headers use one set of
-    columns and data rows use adjacent columns. This detects that pattern and
-    merges them into single columns.
+    columns and data rows use adjacent columns. Also handles duplicate-content
+    columns where the PDF renders the same value in two overlapping columns.
     """
     if not rows:
         return rows
@@ -450,16 +470,18 @@ def collapse_empty_columns(rows: list[list[str]]) -> list[list[str]]:
         changed = False
         num_cols = len(padded[0]) if padded else 0
         for col_idx in range(num_cols - 1):
-            # Check if columns col_idx and col_idx+1 ever both have content
-            conflict = False
+            # Check if columns col_idx and col_idx+1 can be merged
+            # They can merge if: for every row, either one is empty, or both
+            # have the same content (duplicate rendering)
+            can_merge = True
             for row in padded:
                 a = row[col_idx].strip()
                 b = row[col_idx + 1].strip()
-                if a and b:
-                    conflict = True
+                if a and b and a != b:
+                    can_merge = False
                     break
-            if not conflict:
-                # Merge: take whichever has content (or empty if both empty)
+            if can_merge:
+                # Merge: take whichever has content (prefer non-empty)
                 for row in padded:
                     a = row[col_idx].strip()
                     b = row[col_idx + 1].strip()
