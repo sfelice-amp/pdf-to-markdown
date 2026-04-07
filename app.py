@@ -94,6 +94,16 @@ def format_markdown_table(lines: list[str]) -> list[str]:
 
 
 def normalize_text(text: str) -> str:
+    # Clean up repeated characters first (except in tables)
+    lines_raw = text.split('\n')
+    lines_cleaned = []
+    for line in lines_raw:
+        # Only deduplicate non-table lines
+        if not line.strip().startswith('|'):
+            line = deduplicate_repeated_chars(line)
+        lines_cleaned.append(line)
+    text = '\n'.join(lines_cleaned)
+    
     text = text.replace("ﬁ", "fi").replace("ﬂ", "fl").replace("ﬀ", "ff").replace("ﬃ", "ffi").replace("ﬄ", "ffl")
     text = text.replace("“", '"').replace("”", '"').replace("‘", "'" ).replace("’", "'")
     text = text.replace("–", "-").replace("—", "-").replace("…", "...")
@@ -120,6 +130,12 @@ def normalize_text(text: str) -> str:
                 blocks.append(buffer)
                 buffer = []
             blocks.append("")
+        # Preserve markdown table lines as-is
+        elif line.strip().startswith("|"):
+            if buffer:
+                blocks.append(buffer)
+                buffer = []
+            blocks.append(line)
         else:
             buffer.append(line)
 
@@ -132,13 +148,28 @@ def normalize_text(text: str) -> str:
             formatted_blocks.append("")
             continue
 
+        # If it's a markdown table line (already extracted), keep it as-is
+        if isinstance(block, str) and block.strip().startswith("|"):
+            formatted_blocks.append(block)
+            continue
+
         if is_table_block(block):
             formatted_blocks.extend(format_markdown_table(block))
         else:
             merged = " ".join(line for line in block if line.strip())
             formatted_blocks.append(merged)
 
-    paragraph_text = "\n\n".join(formatted_blocks)
+    paragraph_text = ""
+    for i, block in enumerate(formatted_blocks):
+        if i == 0:
+            paragraph_text = block
+        elif block.strip().startswith("|"):
+            # Table rows: join with single newline, no blank line before
+            paragraph_text += "\n" + block
+        else:
+            # Regular blocks: join with double newline (blank line)
+            paragraph_text += "\n\n" + block
+    
     paragraph_text = re.sub(r"\n{3,}", "\n\n", paragraph_text)
 
     return paragraph_text.strip()
@@ -150,10 +181,47 @@ def pdf_has_text(text: str) -> bool:
 
 
 def deduplicate_repeated_chars(text: str) -> str:
-    """Remove repeated characters that PDFs sometimes include.
-    Only removes runs of 3+ identical characters (keeps legitimate double chars like '00' in '200')."""
-    if not text:
+    """Remove repeated patterns and characters that PDFs sometimes include.
+    Handles both character repetition (MM -> M) and substring repetition (To:To: -> To:).
+    Applies multiple passes until no more changes."""
+    if not text or len(text) < 2:
         return text
+    
+    # Apply deduplication multiple times until stable
+    prev_result = text
+    while True:
+        result = _deduplicate_once(prev_result)
+        if result == prev_result:
+            break
+        prev_result = result
+    return result
+
+
+def _deduplicate_once(text: str) -> str:
+    """Single pass of deduplication."""
+    if not text or len(text) < 2:
+        return text
+    
+    # First, try to remove substring repetitions at the START of the string
+    # (e.g., "To:To:To:To: rest of string" -> "To: rest of string")
+    for pattern_len in range(1, len(text) // 2 + 1):
+        if pattern_len > 20:  # Don't check for very long patterns
+            break
+        pattern = text[:pattern_len]
+        # Count how many times pattern repeats from start
+        match_count = 0
+        pos = 0
+        while pos + pattern_len <= len(text) and text[pos:pos+pattern_len] == pattern:
+            match_count += 1
+            pos += pattern_len
+        
+        # If pattern repeats at least 2 times at the start
+        if match_count >= 2:
+            # Return the pattern plus the remainder
+            remainder = text[pos:]
+            return pattern + remainder
+    
+    # Then handle character repetition (runs of 3+ identical chars)
     result = []
     i = 0
     while i < len(text):
