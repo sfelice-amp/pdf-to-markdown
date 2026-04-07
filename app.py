@@ -90,6 +90,25 @@ def extract_lines_with_metadata(chars: list[dict], bbox: tuple | None = None) ->
         # Deduplicate overlapping chars and detect bold-via-overlap
         deduped, bold_flags = _dedup_overlapping_chars(line_chars)
 
+        # Insert synthetic space chars where there are large x-gaps between
+        # consecutive chars. This preserves word boundaries that PDFs encode
+        # as positioning gaps rather than explicit space characters.
+        spaced: list[dict] = []
+        spaced_bold: list[bool] = []
+        for ci, (c, bf) in enumerate(zip(deduped, bold_flags)):
+            if ci > 0:
+                prev = deduped[ci - 1]
+                gap = c['x0'] - (prev['x0'] + prev.get('width', 0))
+                avg_width = prev.get('width', 0) or (c['x0'] - prev['x0'])
+                if avg_width > 0 and gap > avg_width * 0.4 and c['text'] != ' ':
+                    space_char = dict(c, text=' ', width=gap)
+                    spaced.append(space_char)
+                    spaced_bold.append(bf)
+            spaced.append(c)
+            spaced_bold.append(bf)
+        deduped = spaced
+        bold_flags = spaced_bold
+
         text = ''.join(c['text'] for c in deduped).strip()
         # Also apply character-run deduplication (e.g. remaining "SSSS" → "S")
         text = deduplicate_repeated_chars(text)
