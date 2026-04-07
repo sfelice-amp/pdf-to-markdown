@@ -6,11 +6,15 @@ A small local web app that converts PDF and DOCX files into clean Markdown. The 
 
 - Accepts PDF and DOCX uploads via drag-and-drop or file selection
 - Validates file types and sizes (up to 50MB)
-- Uses `pdfminer.six` to read embedded text from PDFs first
-- Falls back to OCR with `pdf2image` + `Tesseract` when needed
+- Uses `pdfplumber` with char-level font analysis to extract text from PDFs
+- Detects headings, subheadings, and titles from font size and weight, rendering them as `#`, `##`, `###`
+- Preserves paragraph breaks using vertical line spacing analysis
+- Detects inline **bold** and *italic* spans from font metadata
+- Falls back to `pdfminer.six` if pdfplumber fails, then to OCR with `pdf2image` + `Tesseract`
 - Converts DOCX files using `mammoth`
-- Cleans common OCR artifacts like ligatures, smart quotes, page numbers, and repeated header/footer lines
-- Detects and formats simple tables as Markdown tables
+- Cleans common artifacts like ligatures, smart quotes, page numbers, and repeated header/footer lines
+- Filters page boilerplate (headers, footers, URLs) by font size
+- Detects and formats tables as Markdown tables with header rows
 - Shows conversion progress with loading indicators
 - Provides feedback on conversion method (text vs. OCR) with warnings for OCR usage
 - Displays output in raw Markdown or rendered preview

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import re
 import tempfile
@@ -15,6 +17,238 @@ BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
 app = Flask(__name__, template_folder=str(TEMPLATES_DIR))
 ALLOWED_EXTENSIONS = {"pdf", "docx"}
+
+
+# ---------------------------------------------------------------------------
+# Font-aware line extraction for heading / paragraph detection
+# ---------------------------------------------------------------------------
+
+def extract_lines_with_metadata(chars: list[dict], bbox: tuple | None = None) -> list[dict]:
+    """Group page.chars into lines with font metadata.
+
+    Each returned dict has keys: text, top, fonts (list of (fontname, size, text)
+    spans), dominant_font, dominant_size, is_bold, is_italic.
+    """
+    if bbox:
+        x0, y0, x1, y1 = bbox
+        chars = [c for c in chars if x0 <= c['x0'] <= x1 and y0 <= c['top'] <= y1]
+
+    if not chars:
+        return []
+
+    # Group chars into lines by y-position (cluster within 2pt)
+    sorted_chars = sorted(chars, key=lambda c: (c['top'], c['x0']))
+    lines: list[list[dict]] = []
+    current_line: list[dict] = []
+    current_y: float | None = None
+
+    for c in sorted_chars:
+        if current_y is None or abs(c['top'] - current_y) <= 2.0:
+            current_line.append(c)
+            if current_y is None:
+                current_y = c['top']
+        else:
+            if current_line:
+                lines.append(current_line)
+            current_line = [c]
+            current_y = c['top']
+    if current_line:
+        lines.append(current_line)
+
+    result = []
+    for line_chars in lines:
+        line_chars.sort(key=lambda c: c['x0'])
+        text = ''.join(c['text'] for c in line_chars).strip()
+        if not text:
+            continue
+
+        # Build font spans
+        spans = []
+        current_span_font = None
+        current_span_size = None
+        current_span_text = []
+        for c in line_chars:
+            fn = c.get('fontname', '')
+            sz = round(c['size'], 1)
+            if fn != current_span_font or sz != current_span_size:
+                if current_span_text:
+                    spans.append((current_span_font, current_span_size, ''.join(current_span_text)))
+                current_span_font = fn
+                current_span_size = sz
+                current_span_text = [c['text']]
+            else:
+                current_span_text.append(c['text'])
+        if current_span_text:
+            spans.append((current_span_font, current_span_size, ''.join(current_span_text)))
+
+        # Determine dominant font (by char count, ignoring whitespace)
+        from collections import Counter
+        font_counts: Counter = Counter()
+        for fn, sz, span_text in spans:
+            count = len(span_text.replace(' ', ''))
+            if count > 0:
+                font_counts[(fn, sz)] += count
+        if not font_counts:
+            continue
+        dominant_font, dominant_size = font_counts.most_common(1)[0][0]
+
+        is_bold = 'Bold' in dominant_font or 'bold' in dominant_font
+        is_italic = 'Italic' in dominant_font or 'italic' in dominant_font
+
+        result.append({
+            'text': text,
+            'top': line_chars[0]['top'],
+            'spans': spans,
+            'dominant_font': dominant_font,
+            'dominant_size': dominant_size,
+            'is_bold': is_bold,
+            'is_italic': is_italic,
+        })
+
+    return result
+
+
+def classify_and_build_markdown(lines: list[dict]) -> str:
+    """Classify lines as title/heading/body/boilerplate and build markdown.
+
+    Uses font statistics to determine the body font, then classifies by
+    relative size and font family differences. Detects paragraph breaks
+    from vertical gaps between lines.
+    """
+    if not lines:
+        return ""
+
+    from collections import Counter
+    import statistics
+
+    # Determine body font: most frequent (font, size) by char count
+    font_char_counts: Counter = Counter()
+    for line in lines:
+        count = len(line['text'].replace(' ', ''))
+        font_char_counts[(line['dominant_font'], line['dominant_size'])] += count
+
+    body_font, body_size = font_char_counts.most_common(1)[0][0]
+    body_is_serif = 'Serif' in body_font or 'Times' in body_font or 'serif' in body_font
+
+    # Calculate median line gap for body text (for paragraph break detection)
+    body_gaps = []
+    prev_top = None
+    for line in lines:
+        if line['dominant_size'] == body_size and abs(line['dominant_size'] - body_size) < 0.5:
+            if prev_top is not None:
+                gap = line['top'] - prev_top
+                if 0 < gap < 100:  # sanity bound
+                    body_gaps.append(gap)
+            prev_top = line['top']
+
+    median_gap = statistics.median(body_gaps) if body_gaps else 14.0
+    para_break_threshold = median_gap * 1.8
+
+    # Classify each line
+    output_parts: list[str] = []
+    prev_top = None
+
+    for line in lines:
+        size = line['dominant_size']
+        font = line['dominant_font']
+        text = line['text']
+        is_bold = line['is_bold']
+        is_sans = 'Sans' in font or 'Helvetica' in font or 'Arial' in font
+
+        # Skip boilerplate (page headers/footers in small font)
+        if size < body_size * 0.85:
+            prev_top = line['top']
+            continue
+
+        # Skip tiny invisible text
+        if size <= 1.0:
+            prev_top = line['top']
+            continue
+
+        # Skip common page header/footer patterns
+        stripped_text = text.strip()
+        if re.match(r'^https?://', stripped_text):
+            prev_top = line['top']
+            continue
+        if re.match(r'^\[.*preprint\]$', stripped_text, re.IGNORECASE):
+            prev_top = line['top']
+            continue
+        # Skip repeated page headers like "JMIR Preprints Lee et al"
+        if re.match(r'^.{0,30}(Preprints?|preprints?).{0,30}et\s+al', stripped_text):
+            prev_top = line['top']
+            continue
+
+        # Detect paragraph break from vertical gap
+        if prev_top is not None:
+            gap = line['top'] - prev_top
+            if gap > para_break_threshold:
+                output_parts.append('')  # blank line = paragraph break
+
+        # Classify heading level
+        size_ratio = size / body_size if body_size > 0 else 1.0
+
+        if size_ratio > 1.35:
+            # Title
+            output_parts.append(f'# {text}')
+        elif size_ratio > 1.1 or (is_bold and is_sans and body_is_serif):
+            # Section heading
+            output_parts.append(f'## {text}')
+        elif is_bold and text == text and len(text) < 80 and not any(c.isdigit() for c in text[-3:]):
+            # Check if this is a standalone bold line (potential subheading)
+            # Only treat as heading if the line is short and looks like a label
+            all_bold = all('Bold' in s[0] or 'bold' in s[0] for s in line['spans'] if s[2].strip())
+            if all_bold and len(text.split()) <= 10:
+                output_parts.append(f'### {text}')
+            else:
+                # Bold body text — wrap in **
+                formatted = _format_inline_spans(line['spans'], body_font, body_size)
+                output_parts.append(formatted)
+        else:
+            # Regular body text — apply inline bold/italic
+            formatted = _format_inline_spans(line['spans'], body_font, body_size)
+            output_parts.append(formatted)
+
+        prev_top = line['top']
+
+    # Merge consecutive heading lines at the same level (multi-line titles)
+    merged = []
+    for part in output_parts:
+        if merged and part.startswith('#'):
+            # Extract heading level and text
+            match_cur = re.match(r'^(#{1,6})\s+(.*)', part)
+            match_prev = re.match(r'^(#{1,6})\s+(.*)', merged[-1])
+            if match_cur and match_prev and match_cur.group(1) == match_prev.group(1):
+                # Same heading level — merge
+                merged[-1] = f'{match_prev.group(1)} {match_prev.group(2)} {match_cur.group(2)}'
+                continue
+        merged.append(part)
+
+    return '\n'.join(merged)
+
+
+def _format_inline_spans(spans: list[tuple], body_font: str, body_size: float) -> str:
+    """Format a line's font spans into markdown with **bold** and *italic*."""
+    parts = []
+    for font, size, text in spans:
+        if not text.strip():
+            parts.append(text)
+            continue
+        is_bold = 'Bold' in font or 'bold' in font
+        is_italic = 'Italic' in font or 'italic' in font
+        # Only mark as bold/italic if different from body font
+        body_is_bold = 'Bold' in body_font or 'bold' in body_font
+        body_is_italic = 'Italic' in body_font or 'italic' in body_font
+
+        if is_bold and is_italic and not (body_is_bold and body_is_italic):
+            parts.append(f'***{text.strip()}***')
+        elif is_bold and not body_is_bold:
+            parts.append(f'**{text.strip()}**')
+        elif is_italic and not body_is_italic:
+            parts.append(f'*{text.strip()}*')
+        else:
+            parts.append(text)
+
+    return ''.join(parts).strip()
 
 
 def allowed_file(filename: str) -> bool:
@@ -196,25 +430,51 @@ def is_page_boilerplate(text: str) -> bool:
     return True
 
 
+def _extract_text_region(page, bbox: tuple | None = None) -> str:
+    """Extract text from a page region using char-level font analysis.
+
+    Returns markdown with headings, paragraph breaks, and inline bold/italic.
+    Falls back to page.extract_text() if char analysis yields nothing.
+    """
+    all_chars = page.chars
+    if bbox:
+        x0, y0, x1, y1 = bbox
+        region_chars = [c for c in all_chars
+                        if c['x0'] >= x0 - 1 and c['x0'] <= x1 + 1
+                        and c['top'] >= y0 - 1 and c['top'] <= y1 + 1]
+    else:
+        region_chars = all_chars
+
+    lines = extract_lines_with_metadata(region_chars)
+    if lines:
+        return classify_and_build_markdown(lines)
+
+    # Fallback
+    if bbox:
+        try:
+            cropped = page.crop(bbox)
+            return cropped.extract_text() or ""
+        except Exception:
+            return ""
+    return page.extract_text() or ""
+
+
 def extract_page_content(page) -> str:
     """Extract text and tables from a single pdfplumber page, interleaved by position.
 
-    Uses table bounding boxes to extract text from non-table regions,
-    then interleaves tables and text segments by their vertical position.
+    Uses char-level font analysis for text regions (headings, paragraphs, bold/italic)
+    and table detection for structured data. Content is interleaved by vertical position.
     """
     tables = page.find_tables()
 
     if not tables:
-        text = page.extract_text() or ""
-        return text
+        return _extract_text_region(page)
 
     # Collect content segments with their vertical position (top of bbox)
     segments = []
 
     # Get table bounding boxes: (x0, top, x1, bottom)
     table_bboxes = [t.bbox for t in tables]
-
-    # Sort table bboxes by vertical position
     sorted_bboxes = sorted(table_bboxes, key=lambda b: b[1])
 
     page_top = 0
@@ -222,31 +482,23 @@ def extract_page_content(page) -> str:
     page_left = 0
     page_right = page.width
 
-    # Extract text from regions between tables
+    # Extract text from regions between tables using char-level analysis
     current_top = page_top
     for bbox in sorted_bboxes:
         table_top = bbox[1]
         if table_top > current_top:
-            crop_box = (page_left, current_top, page_right, table_top)
-            try:
-                cropped = page.crop(crop_box)
-                text = cropped.extract_text() or ""
-                if text.strip() and not is_page_boilerplate(text):
-                    segments.append((current_top, "text", text))
-            except Exception:
-                pass
+            region_bbox = (page_left, current_top, page_right, table_top)
+            text = _extract_text_region(page, region_bbox)
+            if text.strip():
+                segments.append((current_top, "text", text))
         current_top = bbox[3]  # bottom of this table
 
     # Extract text below the last table
     if current_top < page_bottom:
-        crop_box = (page_left, current_top, page_right, page_bottom)
-        try:
-            cropped = page.crop(crop_box)
-            text = cropped.extract_text() or ""
-            if text.strip() and not is_page_boilerplate(text):
-                segments.append((current_top, "text", text))
-        except Exception:
-            pass
+        region_bbox = (page_left, current_top, page_right, page_bottom)
+        text = _extract_text_region(page, region_bbox)
+        if text.strip():
+            segments.append((current_top, "text", text))
 
     # Extract tables, clean columns, and convert to markdown
     for table_obj, bbox in zip(tables, table_bboxes):
@@ -282,8 +534,8 @@ def normalize_text(text: str) -> str:
     lines_raw = text.split('\n')
     lines_cleaned = []
     for line in lines_raw:
-        # Only deduplicate non-table lines
-        if not line.strip().startswith('|'):
+        # Only deduplicate non-table and non-heading lines
+        if not line.strip().startswith('|') and not re.match(r'^#{1,6}\s', line.strip()):
             line = deduplicate_repeated_chars(line)
         lines_cleaned.append(line)
     text = '\n'.join(lines_cleaned)
@@ -314,13 +566,20 @@ def normalize_text(text: str) -> str:
     buffer: list[str] = []
 
     for line in lines:
-        if line.strip() == "":
+        stripped = line.strip()
+        if stripped == "":
             if buffer:
                 blocks.append(buffer)
                 buffer = []
             blocks.append("")
         # Preserve markdown table lines as-is
-        elif line.strip().startswith("|"):
+        elif stripped.startswith("|"):
+            if buffer:
+                blocks.append(buffer)
+                buffer = []
+            blocks.append(line)
+        # Preserve markdown heading lines as standalone blocks
+        elif re.match(r'^#{1,6}\s', stripped):
             if buffer:
                 blocks.append(buffer)
                 buffer = []
@@ -337,8 +596,8 @@ def normalize_text(text: str) -> str:
             formatted_blocks.append("")
             continue
 
-        # If it's a markdown table line (already extracted), keep it as-is
-        if isinstance(block, str) and block.strip().startswith("|"):
+        # If it's a standalone string (table line or heading), keep as-is
+        if isinstance(block, str):
             formatted_blocks.append(block)
             continue
 

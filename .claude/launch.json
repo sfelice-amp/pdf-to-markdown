@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pdf-to-markdown",
+      "runtimeExecutable": ".venv/bin/python3",
+      "runtimeArgs": ["app.py", "5000"],
+      "port": 5000
+    }
+  ]
+}
