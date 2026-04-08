@@ -1,87 +1,91 @@
-# Local PDF / DOCX to Markdown Web App
+# PDF / DOCX to Markdown
 
-A local web app that converts PDF and DOCX files into structured Markdown with heading detection, paragraph preservation, and inline formatting. Uses char-level font analysis for intelligent structure recognition. Falls back to Tesseract OCR for scanned or image-only PDFs.
+A local tool that converts PDF and DOCX files into structured Markdown with heading detection, paragraph preservation, and inline formatting. Uses font analysis for intelligent structure recognition. Everything runs locally — no uploads, no cloud services.
 
-## What it does
+Two versions are included:
 
-### Structure detection
+- **`converter.html`** — A single HTML file that runs entirely in the browser. No server, no installs, no terminal. Just open the file.
+- **`app.py`** — A Flask server with OCR fallback for scanned/image-only PDFs via Tesseract.
 
-- Analyses char-level font metadata (size, weight, family) to detect document hierarchy
-- Titles, section headings, and subheadings rendered as `#`, `##`, `###` based on font size ratios
-- Paragraph breaks preserved using vertical line spacing analysis
-- Bullet lists detected from x-position indentation relative to body text margin
-- Word boundaries preserved by detecting x-position gaps between characters
+## Quick start
 
-### Text formatting
+### Browser version (recommended)
 
-- Inline **bold** and *italic* spans detected from font metadata
-- Bold-via-character-overlap detected (common in email-to-PDF rendering)
-- Ligatures, smart quotes, em-dashes, and repeated characters cleaned automatically
-- Page boilerplate (headers, footers, page numbers, URLs) filtered by font size
+Open `converter.html` in Chrome, Safari, or Firefox. That's it.
 
-### Tables
+- Works from `file://` — no server needed
+- Drag-and-drop or click to select a PDF or DOCX
+- All processing happens in your browser, nothing leaves your machine
 
-- Tables detected and extracted using `pdfplumber` structural analysis
-- Duplicate/ghost columns from PDF rendering merged automatically
-- Tables formatted as Markdown with header rows and separator lines
+### Server version (OCR support)
 
-### File support
-
-- **PDF** (embedded text): `pdfplumber` with char-level analysis, falls back to `pdfminer.six`
-- **PDF** (scanned/image): OCR via `pdf2image` + `Tesseract`
-- **DOCX**: HTML-to-Markdown conversion via `mammoth`
-
-### Web interface
-
-- Drag-and-drop or file selection (up to 50MB)
-- Raw Markdown or rendered preview toggle
-- Copy to clipboard or download as `.md` file
-- Conversion method indicator (Embedded text / OCR / DOCX)
-
-## Setup and run
-
-From the `pdf-to-markdown` folder:
+If you need OCR for scanned PDFs:
 
 ```bash
 ./run.sh
 ```
 
-Then open:
+Then open `http://127.0.0.1:5000` in your browser.
 
-```text
-http://127.0.0.1:5000
-```
+The startup script installs system dependencies (`tesseract`, `poppler`), creates a Python virtual environment, and finds an available port (5000–5010). Press `Ctrl+C` to stop the server.
 
-The startup script installs system dependencies (`tesseract`, `poppler`), creates a Python virtual environment, and finds an available port (5000-5010).
+Requires macOS with Homebrew and Python 3.9+.
 
-## Stop the server
+## What it does
 
-Press `Ctrl+C` in the terminal where the app is running.
+### Structure detection
 
-## Requirements
+- Analyses font metadata (size, weight, family) to detect document hierarchy
+- Titles, section headings, and subheadings rendered as `#`, `##`, `###` based on font size ratios
+- Paragraph breaks preserved using vertical line spacing analysis
+- Bullet lists detected from indentation relative to body text margin
+- Two-column layouts detected and extracted in reading order (browser version)
 
-- macOS with Homebrew
-- Python 3.9+
-- `tesseract` and `poppler` (installed automatically by `run.sh`)
+### Text formatting
+
+- Inline **bold** and *italic* spans detected from font metadata
+- Bold detection from font name parsing (e.g. `GTAmerica-Bold`) when explicit metadata is unavailable
+- Ligatures, smart quotes, em-dashes, and repeated characters cleaned automatically
+- Page boilerplate (headers, footers, page numbers) filtered by font size
+
+### Tables
+
+- Tables detected from positional gaps between text spans
+- Duplicate/ghost columns from PDF rendering merged automatically
+- Tables formatted as Markdown with header rows and separator lines
+
+### File support
+
+- **PDF** (embedded text): font-aware extraction with heading and paragraph detection
+- **PDF** (scanned/image): OCR via Tesseract (server version only)
+- **DOCX**: HTML-to-Markdown conversion via mammoth
+
+### Web interface
+
+- Drag-and-drop or file selection (up to 50 MB)
+- Raw Markdown or rendered preview toggle
+- Copy to clipboard or download as `.md` file
+- Conversion method indicator (Embedded text / OCR / DOCX)
 
 ## How it works
 
-The extraction pipeline analyses each PDF page at the character level:
+The extraction pipeline analyses each PDF page at the character or span level:
 
-1. **Character grouping** - Groups `page.chars` into lines by y-position, deduplicates overlapping characters (bold-via-overlap detection), and inserts spaces at x-position gaps
-2. **Font classification** - Determines the body font (most frequent at >= 8pt), then classifies each line by font size ratio and weight relative to body text
-3. **Structure detection** - Lines with size > 1.35x body become titles; bold sans-serif at body size become section headings; standalone bold lines become subheadings; indented lines become bullets
-4. **Paragraph detection** - Vertical gaps > 1.8x the median line spacing insert paragraph breaks
-5. **Table extraction** - `pdfplumber.find_tables()` detects structured tables, with column deduplication for offset/overlapping column grids
-6. **Normalisation** - Ligatures, smart quotes, repeated characters, and page boilerplate stripped; heading and bullet lines preserved as standalone blocks
-
-All detection is pattern-based and content-agnostic - no document-specific rules are embedded.
+1. **Text extraction** — Reads text items with position, size, and font metadata from each page
+2. **Column detection** — Identifies two-column layouts by finding consistent vertical gutters near the page center, then splits items into left and right columns in reading order
+3. **Line grouping** — Groups text items into lines by y-position, inserting spaces at x-position gaps to preserve word boundaries
+4. **Font classification** — Determines the body font (most frequent at ≥ 8pt), then classifies each line by font size ratio and weight relative to body text
+5. **Structure detection** — Lines with size > 1.35× body become titles; bold sans-serif at body size become section headings; standalone bold lines become subheadings; indented lines become bullets
+6. **Paragraph detection** — Vertical gaps > 1.8× the median line spacing insert paragraph breaks
+7. **Table extraction** — Lines with large positional gaps between spans are identified as table rows; consecutive table rows are formatted as Markdown tables with clustered column boundaries
+8. **Formatting** — Bold and italic spans within body lines wrapped in `**` and `*` markers; ligatures, smart quotes, and boilerplate cleaned
 
 ## Known limitations
 
 - Complex tables with merged cells or irregular layouts may not convert perfectly
 - Multi-page tables may show repeated headers (one per PDF page)
 - Images and embedded graphics are not extracted
+- PDFs with custom font encodings (e.g. Apple .SFNS symbol fonts) may produce garbled text — these require OCR (server version)
 - OCR quality depends on scan quality and page layout
 - Non-English text may produce imperfect OCR results unless Tesseract language packs are configured
 - DOCX conversion is simplified via HTML-to-Markdown rules and may not preserve every style nuance
