@@ -6,6 +6,12 @@
       "runtimeExecutable": ".venv/bin/python3",
       "runtimeArgs": ["app.py", "5000"],
       "port": 5000
+    },
+    {
+      "name": "converter-static",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8080"],
+      "port": 8080
     }
   ]
 }

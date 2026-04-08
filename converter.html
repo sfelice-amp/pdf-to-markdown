@@ -1,0 +1,1351 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF / DOCX to Markdown</title>
+  <style>
+    :root {
+      color-scheme: light;
+    }
+
+    body {
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: linear-gradient(180deg, #f8fafc 0%, #edf2fb 100%);
+      color: #0f172a;
+      margin: 0;
+      min-height: 100vh;
+    }
+
+    .page {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px 24px 48px;
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: clamp(2rem, 3vw, 2.6rem);
+      line-height: 1.05;
+    }
+
+    p.lead {
+      color: #334155;
+      margin-top: 0;
+      max-width: 760px;
+    }
+
+    .dropzone {
+      border: 2px dashed #7c92b5;
+      border-radius: 24px;
+      background: #ffffff;
+      padding: 42px 30px;
+      text-align: center;
+      transition: border-color .2s ease, background .2s ease, transform .2s ease;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 12px;
+      min-height: 220px;
+      box-shadow: 0 20px 45px rgba(15, 23, 42, 0.08);
+    }
+
+    .dropzone:hover,
+    .dropzone.hover {
+      background: #eef4ff;
+      border-color: #4f46e5;
+      transform: translateY(-1px);
+    }
+
+    .dropzone.loading {
+      opacity: 0.85;
+      cursor: wait;
+    }
+
+    .dropzone strong {
+      font-size: 1.05rem;
+    }
+
+    .dropzone input {
+      display: none;
+    }
+
+    .file-info {
+      margin-top: 8px;
+      font-size: 0.9rem;
+      color: #475569;
+    }
+
+    .file-info.error {
+      color: #dc2626;
+    }
+
+    .output {
+      margin-top: 26px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .conversion-method {
+      color: #475569;
+      font-size: 0.95rem;
+      margin-left: auto;
+    }
+
+    .conversion-method.warning {
+      color: #d97706;
+      font-weight: 500;
+    }
+
+    .loading-indicator {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      color: #475569;
+      font-size: 0.95rem;
+    }
+
+    .loading-indicator.visible {
+      display: inline-flex;
+    }
+
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(79, 70, 229, 0.25);
+      border-top-color: #4f46e5;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 360px;
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;
+      font-size: 0.96rem;
+      line-height: 1.6;
+      resize: vertical;
+      box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.06);
+    }
+
+    #preview-output {
+      width: 100%;
+      min-height: 360px;
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 0.96rem;
+      line-height: 1.6;
+      box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.06);
+      overflow-wrap: break-word;
+    }
+
+    button {
+      width: 100%;
+      max-width: 260px;
+      justify-self: start;
+      border: none;
+      border-radius: 14px;
+      background: #4f46e5;
+      color: white;
+      padding: 14px 20px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .2s ease, transform .2s ease;
+      box-shadow: 0 12px 30px rgba(79, 70, 229, 0.18);
+    }
+
+    button:hover:not(:disabled) {
+      background: #4338ca;
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      background: #c7d2fe;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .status {
+      color: #475569;
+      font-size: 0.95rem;
+    }
+  </style>
+</head>
+
+<body>
+  <main class="page">
+    <h1>PDF / DOCX to Markdown</h1>
+    <p class="lead">Drop a PDF or DOCX file below. Everything runs locally in your browser — no server, no uploads, no
+      installs.</p>
+
+    <label id="dropzone" class="dropzone">
+      <input type="file" id="file-input" accept=".pdf,.docx" />
+      <strong>Drop a PDF or DOCX here</strong>
+      <div class="status">or click to select a file.</div>
+      <div id="file-info" class="file-info" hidden></div>
+    </label>
+
+    <div class="output">
+      <div class="controls">
+        <button id="download-button" disabled>Download Markdown</button>
+        <button id="copy-button" disabled>Copy Markdown</button>
+        <button id="toggle-preview" disabled>Preview</button>
+        <span id="conversion-method" class="conversion-method"></span>
+        <span id="loading-indicator" class="loading-indicator" aria-live="polite" hidden>
+          <span class="spinner"></span>
+          Converting...
+        </span>
+      </div>
+      <textarea id="markdown-output" placeholder="Converted markdown will appear here..." readonly></textarea>
+      <div id="preview-output" hidden></div>
+      <div id="message" class="status"></div>
+    </div>
+  </main>
+
+  <!-- PDF.js 3.x (UMD build — works from file:// and http://) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+  <!-- Mammoth (DOCX) -->
+  <script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
+
+  <!-- Marked (Markdown preview) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <script>
+    // =========================================================================
+    // PDF.js setup
+    // =========================================================================
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    // =========================================================================
+    // Text utilities
+    // =========================================================================
+
+    function detectRepetitionFactor(text) {
+      if (text.length < 10) return 0;
+      const runLengths = {};
+      let i = 0;
+      while (i < text.length) {
+        const ch = text[i];
+        let count = 1;
+        while (i + count < text.length && text[i + count] === ch) count++;
+        if (count >= 3 && ch !== ' ') {
+          runLengths[count] = (runLengths[count] || 0) + 1;
+        }
+        i += count;
+      }
+      let bestFactor = 0, bestFreq = 0;
+      for (const [factor, freq] of Object.entries(runLengths)) {
+        if (+freq > bestFreq) { bestFreq = +freq; bestFactor = +factor; }
+      }
+      return (bestFreq >= 3 && bestFactor >= 3) ? bestFactor : 0;
+    }
+
+    function deduplicateRepeatedChars(text) {
+      if (!text || text.length < 2) return text;
+
+      // Remove substring repetitions at start
+      for (let pLen = 2; pLen <= Math.min(text.length / 2, 20); pLen++) {
+        const pattern = text.slice(0, pLen);
+        let matchCount = 0, pos = 0;
+        while (pos + pLen <= text.length && text.slice(pos, pos + pLen) === pattern) {
+          matchCount++;
+          pos += pLen;
+        }
+        if (matchCount >= 3) return pattern + text.slice(pos);
+      }
+
+      const factor = detectRepetitionFactor(text);
+      const result = [];
+      let i = 0;
+      while (i < text.length) {
+        const ch = text[i];
+        let count = 1;
+        while (i + count < text.length && text[i + count] === ch) count++;
+
+        if (factor && count >= factor) {
+          const target = Math.max(1, Math.round(count / factor));
+          for (let j = 0; j < target; j++) result.push(ch);
+        } else if (count >= 3 && !/[a-zA-Z0-9]/.test(ch) && ch !== ' ') {
+          result.push(ch);
+        } else {
+          for (let j = 0; j < count; j++) result.push(ch);
+        }
+        i += count;
+      }
+      return result.join('');
+    }
+
+    // =========================================================================
+    // PDF extraction pipeline
+    // =========================================================================
+
+    async function extractPDF(arrayBuffer) {
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      const pageTexts = [];
+
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const text = await extractPageContent(page);
+        if (text.trim()) pageTexts.push(text);
+      }
+
+      const raw = pageTexts.join('\n\n');
+      return normalizeText(raw);
+    }
+
+    async function extractPageContent(page) {
+      // Run both in parallel — getOperatorList populates commonObjs with font data
+      const [textContent] = await Promise.all([
+        page.getTextContent(),
+        page.getOperatorList(),
+      ]);
+
+      const { items, styles } = textContent;
+      if (!items || items.length === 0) return '';
+
+      // Build font metadata from commonObjs (now populated after getOperatorList)
+      const fontMeta = {};
+      for (const fontName of Object.keys(styles)) {
+        try {
+          const font = page.commonObjs.get(fontName);
+          if (font) {
+            const fname = font.name || fontName;
+            fontMeta[fontName] = {
+              name: fname,
+              bold: !!font.bold || /bold/i.test(fname) || /Black/i.test(fname),
+              italic: !!font.italic || /italic|oblique/i.test(fname),
+              black: !!font.black || /Black/i.test(fname),
+            };
+          }
+        } catch {
+          fontMeta[fontName] = { name: fontName, bold: false, italic: false, black: false };
+        }
+      }
+
+      const pageHeight = (page.view[3] || 792) - (page.view[1] || 0);
+      const pageWidth = (page.view[2] || 612) - (page.view[0] || 0);
+
+      // Normalize items before column detection
+      const normItems = normalizeItems(items, styles, fontMeta, pageHeight);
+      if (normItems.length === 0) return '';
+
+      // Detect multi-column layout at the item level (before line grouping)
+      const columnGroups = detectColumnsFromItems(normItems, pageWidth);
+
+      // Process each column: group into lines, detect tables, build markdown
+      const columnTexts = columnGroups.map(colItems => {
+        const lines = groupItemsIntoLines(colItems);
+        if (lines.length === 0) return '';
+        const segments = detectTablesAndText(lines, pageWidth);
+        return segments.join('\n\n');
+      });
+
+      return columnTexts.filter(t => t.trim()).join('\n\n');
+    }
+
+    // -------------------------------------------------------------------------
+    // Multi-column layout detection (at item level, before line grouping)
+    // -------------------------------------------------------------------------
+
+    function detectColumnsFromItems(normItems, pageWidth) {
+      if (normItems.length < 8) return [normItems];
+
+      // Group items into rough y-lines (within 3pt)
+      const sorted = [...normItems].filter(i => i.text.trim())
+        .sort((a, b) => a.top - b.top || a.x0 - b.x0);
+      const yGroups = [];
+      let curGroup = [sorted[0]];
+      let curY = sorted[0].top;
+
+      for (let i = 1; i < sorted.length; i++) {
+        if (Math.abs(sorted[i].top - curY) <= 3.0) {
+          curGroup.push(sorted[i]);
+        } else {
+          yGroups.push(curGroup);
+          curGroup = [sorted[i]];
+          curY = sorted[i].top;
+        }
+      }
+      if (curGroup.length) yGroups.push(curGroup);
+
+      // For each y-group, find the largest internal x-gap near the page center
+      const pageMid = pageWidth / 2;
+      const gutterCandidates = [];
+
+      let yGroupsWithGutter = 0;
+      for (const group of yGroups) {
+        group.sort((a, b) => a.x0 - b.x0);
+        let foundGutter = false;
+        for (let i = 1; i < group.length; i++) {
+          const gap = group[i].x0 - (group[i - 1].x0 + group[i - 1].width);
+          const gapCenter = (group[i - 1].x0 + group[i - 1].width + group[i].x0) / 2;
+          // Consider gaps > 30pt near the page center as gutter candidates
+          if (gap > 30 && Math.abs(gapCenter - pageMid) < pageWidth * 0.2) {
+            gutterCandidates.push(gapCenter);
+            foundGutter = true;
+          }
+        }
+        if (foundGutter) yGroupsWithGutter++;
+      }
+
+      // Need at least 15% of y-groups to have a gutter
+      if (yGroupsWithGutter < Math.max(4, yGroups.length * 0.15)) {
+        return [normItems];
+      }
+
+      // Check that gutter positions are consistent (real columns have a tight cluster).
+      // Tables have gaps at various x-positions → scattered gutters.
+      if (gutterCandidates.length >= 3) {
+        gutterCandidates.sort((a, b) => a - b);
+        const median = gutterCandidates[Math.floor(gutterCandidates.length / 2)];
+        const deviations = gutterCandidates.map(x => Math.abs(x - median));
+        const avgDeviation = deviations.reduce((a, b) => a + b, 0) / deviations.length;
+        // If gutter positions vary by more than 40pt on average, it's not a column layout
+        if (avgDeviation > 40) return [normItems];
+      }
+
+      // Find the dominant gutter position (median)
+      gutterCandidates.sort((a, b) => a - b);
+      const gutterX = gutterCandidates[Math.floor(gutterCandidates.length / 2)];
+
+      // Now split items per y-group: only split lines that have a gap near the gutter
+      const leftItems = [];
+      const rightItems = [];
+
+      // Process ALL items (including empty/whitespace) grouped by y
+      const allSorted = [...normItems].sort((a, b) => a.top - b.top || a.x0 - b.x0);
+      const allYGroups = [];
+      let cg = [allSorted[0]];
+      let cy = allSorted[0].top;
+      for (let i = 1; i < allSorted.length; i++) {
+        if (Math.abs(allSorted[i].top - cy) <= 3.0) {
+          cg.push(allSorted[i]);
+        } else {
+          allYGroups.push(cg);
+          cg = [allSorted[i]];
+          cy = allSorted[i].top;
+        }
+      }
+      if (cg.length) allYGroups.push(cg);
+
+      for (const group of allYGroups) {
+        group.sort((a, b) => a.x0 - b.x0);
+
+        const minX = Math.min(...group.map(i => i.x0));
+        const maxX = Math.max(...group.map(i => i.x0 + i.width));
+        const allLeft = maxX < gutterX + 10;    // all items are left of gutter
+        const allRight = minX > gutterX - 10;   // all items are right of gutter
+
+        if (allLeft) {
+          // Entirely in left column
+          leftItems.push(...group);
+        } else if (allRight) {
+          // Entirely in right column
+          rightItems.push(...group);
+        } else {
+          // Items span both sides — check if there's a gap near the gutter
+          let hasGutter = false;
+          for (let i = 1; i < group.length; i++) {
+            const gap = group[i].x0 - (group[i - 1].x0 + group[i - 1].width);
+            const gapCenter = (group[i - 1].x0 + group[i - 1].width + group[i].x0) / 2;
+            if (gap > 20 && Math.abs(gapCenter - gutterX) < 40) {
+              hasGutter = true;
+              break;
+            }
+          }
+
+          if (hasGutter) {
+            // Split at gutter
+            for (const item of group) {
+              if (item.x0 < gutterX) leftItems.push(item);
+              else rightItems.push(item);
+            }
+          } else {
+            // Full-width content (spans gutter but no gap) — keep together in left
+            leftItems.push(...group);
+          }
+        }
+      }
+
+      // Verify both columns have content
+      if (rightItems.length < normItems.length * 0.05) {
+        return [normItems];
+      }
+
+      return [leftItems, rightItems];
+    }
+
+    // -------------------------------------------------------------------------
+    // Table detection from text item x-positions
+    // -------------------------------------------------------------------------
+
+    function detectTablesAndText(lines, pageWidth) {
+      // A line is a potential table row if its spans have large internal x-gaps.
+      // Threshold: a gap wider than 3x the font size between spans.
+      const gapThreshold = 2.5; // multiplier of font size
+
+      // Mark each line as potential table row
+      const lineInfo = lines.map(line => {
+        // Count "column breaks": gaps between spans that are > threshold
+        let colBreaks = 0;
+        const breakPositions = []; // x-positions where column breaks occur
+        for (let i = 1; i < line.spans.length; i++) {
+          const span = line.spans[i];
+          const prev = line.spans[i - 1];
+          const gap = span.x0 - (prev.x0 + prev.width);
+          if (gap > line.dominantSize * gapThreshold) {
+            colBreaks++;
+            breakPositions.push(span.x0);
+          }
+        }
+        return { line, colBreaks, breakPositions, isTableRow: colBreaks >= 1 };
+      });
+
+      // Find table regions: 2+ consecutive table-row lines
+      const segments = [];
+      let textLines = [];
+      let tableBuffer = [];
+
+      for (let i = 0; i < lineInfo.length; i++) {
+        const info = lineInfo[i];
+
+        if (info.isTableRow) {
+          tableBuffer.push(info);
+        } else {
+          if (tableBuffer.length >= 2) {
+            // Flush text before table
+            if (textLines.length > 0) {
+              segments.push(classifyAndBuildMarkdown(textLines));
+              textLines = [];
+            }
+            segments.push(buildTableFromPositions(tableBuffer));
+          } else {
+            // Not enough rows for a table — treat as text
+            for (const tb of tableBuffer) textLines.push(tb.line);
+          }
+          tableBuffer = [];
+          textLines.push(info.line);
+        }
+      }
+
+      // Flush remaining
+      if (tableBuffer.length >= 2) {
+        if (textLines.length > 0) {
+          segments.push(classifyAndBuildMarkdown(textLines));
+          textLines = [];
+        }
+        segments.push(buildTableFromPositions(tableBuffer));
+      } else {
+        for (const tb of tableBuffer) textLines.push(tb.line);
+      }
+      if (textLines.length > 0) {
+        segments.push(classifyAndBuildMarkdown(textLines));
+      }
+
+      return segments.filter(s => s.trim());
+    }
+
+    function buildTableFromPositions(tableInfos) {
+      // Determine column boundaries by clustering x-positions of all spans across all rows.
+      // Each span's x0 represents a potential column start.
+      const allX0s = [];
+      for (const info of tableInfos) {
+        for (const span of info.line.spans) {
+          if (span.text.trim()) allX0s.push(span.x0);
+        }
+      }
+      allX0s.sort((a, b) => a - b);
+
+      // Cluster x-positions within 8pt of each other
+      const clusters = [];
+      for (const x of allX0s) {
+        const existing = clusters.find(c => Math.abs(c.center - x) < 8);
+        if (existing) {
+          existing.positions.push(x);
+          existing.center = existing.positions.reduce((a, b) => a + b) / existing.positions.length;
+        } else {
+          clusters.push({ center: x, positions: [x] });
+        }
+      }
+
+      // Sort clusters by position, keep those that appear in multiple rows
+      const colStarts = clusters
+        .filter(c => c.positions.length >= Math.max(2, tableInfos.length * 0.3))
+        .sort((a, b) => a.center - b.center)
+        .map(c => c.center);
+
+      if (colStarts.length < 2) {
+        // Can't form a table, return as text
+        return tableInfos.map(info => info.line.text).join('\n');
+      }
+
+      // For each row, assign spans to columns based on nearest column start
+      const rows = tableInfos.map(info => {
+        const cells = new Array(colStarts.length).fill('');
+        for (const span of info.line.spans) {
+          const text = span.text.trim();
+          if (!text) continue;
+          // Find nearest column
+          let bestCol = 0;
+          let bestDist = Infinity;
+          for (let c = 0; c < colStarts.length; c++) {
+            const dist = Math.abs(span.x0 - colStarts[c]);
+            if (dist < bestDist) { bestDist = dist; bestCol = c; }
+          }
+          cells[bestCol] = cells[bestCol]
+            ? cells[bestCol] + ' ' + text
+            : text;
+        }
+        return cells;
+      });
+
+      // Collapse empty columns
+      const nonEmptyCols = [];
+      for (let c = 0; c < colStarts.length; c++) {
+        if (rows.some(row => row[c].trim())) nonEmptyCols.push(c);
+      }
+      const finalRows = rows.map(row => nonEmptyCols.map(c => row[c]));
+
+      if (finalRows.length < 1 || nonEmptyCols.length < 2) {
+        return tableInfos.map(info => info.line.text).join('\n');
+      }
+
+      // Build markdown table
+      const header = finalRows[0];
+      const mdLines = [];
+      mdLines.push('| ' + header.join(' | ') + ' |');
+      mdLines.push('| ' + header.map(() => '---').join(' | ') + ' |');
+      for (let i = 1; i < finalRows.length; i++) {
+        mdLines.push('| ' + finalRows[i].join(' | ') + ' |');
+      }
+      return mdLines.join('\n');
+    }
+
+    // -------------------------------------------------------------------------
+    // Group PDF.js text items into lines with font metadata
+    // -------------------------------------------------------------------------
+
+    function normalizeItems(items, styles, fontMeta, pageHeight) {
+      const normalised = [];
+      for (const item of items) {
+        if (!('str' in item) || !item.str) continue;
+
+        const t = item.transform;
+        const fontSize = Math.hypot(t[0], t[1]);
+        const x = t[4];
+        const top = pageHeight - t[5];
+        const width = Math.abs(item.width);
+
+        const style = styles[item.fontName] || {};
+        const fm = fontMeta[item.fontName] || {};
+
+        const fontFamily = style.fontFamily || '';
+        const isSans = fontFamily === 'sans-serif'
+          || /sans|helvetica|arial/i.test(fm.name || '');
+        const isSerif = fontFamily === 'serif'
+          || /serif|times|garamond|palatino/i.test(fm.name || '');
+
+        normalised.push({
+          text: item.str,
+          x0: x,
+          top: top,
+          width: width,
+          fontSize: fontSize,
+          fontName: fm.name || item.fontName,
+          rawFontName: item.fontName,
+          isBold: fm.bold || fm.black || false,
+          isItalic: fm.italic || false,
+          isSans,
+          isSerif,
+        });
+      }
+      return normalised;
+    }
+
+    function groupItemsIntoLines(normItems) {
+      if (normItems.length === 0) return [];
+
+      // Sort by y then x
+      const sorted = [...normItems].sort((a, b) => a.top - b.top || a.x0 - b.x0);
+
+      // Group into lines by y-position (cluster within 2pt)
+      const rawLines = [];
+      let curLine = [sorted[0]];
+      let curY = sorted[0].top;
+
+      for (let i = 1; i < sorted.length; i++) {
+        const item = sorted[i];
+        if (Math.abs(item.top - curY) <= 2.0) {
+          curLine.push(item);
+        } else {
+          rawLines.push(curLine);
+          curLine = [item];
+          curY = item.top;
+        }
+      }
+      if (curLine.length) rawLines.push(curLine);
+
+      // Build structured lines
+      const result = [];
+      for (const lineItems of rawLines) {
+        const line = buildLineFromItems(lineItems);
+        if (line && line.text.trim()) result.push(line);
+      }
+      return result;
+    }
+
+    function buildLineFromItems(items) {
+      items.sort((a, b) => a.x0 - b.x0);
+
+      // Deduplicate overlapping items (bold-via-overlap detection)
+      const deduped = [];
+      const overlapBoldFlags = [];
+      let i = 0;
+      while (i < items.length) {
+        const item = items[i];
+        let overlapCount = 1;
+        while (i + overlapCount < items.length
+          && Math.abs(items[i + overlapCount].x0 - item.x0) < 0.5
+          && items[i + overlapCount].text === item.text) {
+          overlapCount++;
+        }
+        deduped.push(item);
+        overlapBoldFlags.push(overlapCount >= 2);
+        i += overlapCount;
+      }
+
+      // Build text with space insertion between runs
+      let fullText = '';
+      const spans = [];
+      let maxGap = 0; // track largest gap between items (for table detection)
+      const spanPositions = []; // x0 positions of each span for column detection
+
+      for (let j = 0; j < deduped.length; j++) {
+        const item = deduped[j];
+        let prefix = '';
+        let gap = 0;
+
+        if (j > 0) {
+          const prev = deduped[j - 1];
+          gap = item.x0 - (prev.x0 + prev.width);
+          // Insert space if significant gap between runs
+          if (gap > item.fontSize * 0.15 && !item.text.startsWith(' ') && !fullText.endsWith(' ')) {
+            prefix = ' ';
+          }
+          if (gap > maxGap) maxGap = gap;
+        }
+
+        fullText += prefix + item.text;
+        spanPositions.push({ x0: item.x0, width: item.width, gap });
+
+        const isBold = item.isBold || overlapBoldFlags[j];
+        spans.push({
+          fontName: item.fontName,
+          fontSize: item.fontSize,
+          text: prefix + item.text,
+          isBold,
+          isItalic: item.isItalic,
+          isSans: item.isSans,
+          isSerif: item.isSerif,
+          x0: item.x0,
+          width: item.width,
+        });
+      }
+
+      const text = deduplicateRepeatedChars(fullText.trim());
+      if (!text) return null;
+
+      // Determine dominant font (by char count)
+      const fontCounts = {};
+      for (const span of spans) {
+        const chars = span.text.replace(/\s/g, '').length;
+        if (chars === 0) continue;
+        const key = `${span.fontName}|||${span.fontSize.toFixed(1)}`;
+        fontCounts[key] = (fontCounts[key] || 0) + chars;
+      }
+
+      let dominantKey = Object.entries(fontCounts).sort((a, b) => b[1] - a[1])[0];
+      let dominantFont = spans[0]?.fontName || '';
+      let dominantSize = spans[0]?.fontSize || 12;
+      let dominantSans = spans[0]?.isSans || false;
+      let dominantSerif = spans[0]?.isSerif || false;
+
+      if (dominantKey) {
+        const [fn, sz] = dominantKey[0].split('|||');
+        dominantFont = fn;
+        dominantSize = parseFloat(sz);
+        const matchSpan = spans.find(s =>
+          s.fontName === fn && Math.abs(s.fontSize - dominantSize) < 0.5);
+        if (matchSpan) {
+          dominantSans = matchSpan.isSans;
+          dominantSerif = matchSpan.isSerif;
+        }
+      }
+
+      // Count bold chars
+      let boldChars = 0, totalChars = 0;
+      for (const span of spans) {
+        const c = span.text.replace(/\s/g, '').length;
+        totalChars += c;
+        if (span.isBold) boldChars += c;
+      }
+      const overlapBoldRatio = totalChars > 0 ? boldChars / totalChars : 0;
+
+      return {
+        text,
+        top: items[0].top,
+        x0: deduped[0]?.x0 || 0,
+        spans,
+        spanPositions,
+        maxGap,
+        dominantFont,
+        dominantSize,
+        isBold: overlapBoldRatio > 0.5,
+        isItalic: spans.some(s => s.isItalic),
+        isSans: dominantSans,
+        isSerif: dominantSerif,
+        hasOverlapBold: overlapBoldFlags.some(b => b),
+      };
+    }
+
+    // -------------------------------------------------------------------------
+    // Classify lines as heading / body / bullet and build markdown
+    // -------------------------------------------------------------------------
+
+    function classifyAndBuildMarkdown(lines) {
+      if (!lines.length) return '';
+
+      // Determine body font: most frequent (font, size >= 8pt) by char count
+      const fontCharCounts = {};
+      for (const line of lines) {
+        if (line.dominantSize < 8.0) continue;
+        const count = line.text.replace(/\s/g, '').length;
+        const key = `${line.dominantFont}|||${line.dominantSize.toFixed(1)}`;
+        fontCharCounts[key] = (fontCharCounts[key] || 0) + count;
+      }
+
+      let bodyKey = Object.entries(fontCharCounts).sort((a, b) => b[1] - a[1])[0];
+      if (!bodyKey) {
+        // Fallback: include all sizes
+        for (const line of lines) {
+          const count = line.text.replace(/\s/g, '').length;
+          const key = `${line.dominantFont}|||${line.dominantSize.toFixed(1)}`;
+          fontCharCounts[key] = (fontCharCounts[key] || 0) + count;
+        }
+        bodyKey = Object.entries(fontCharCounts).sort((a, b) => b[1] - a[1])[0];
+      }
+
+      const [bodyFont, bodySizeStr] = bodyKey[0].split('|||');
+      const bodySize = parseFloat(bodySizeStr);
+      const bodyIsSerif = /serif|times|garamond|palatino/i.test(bodyFont);
+
+      // Calculate median line gap for paragraph break detection
+      const bodyGaps = [];
+      let prevTop = null;
+      for (const line of lines) {
+        if (Math.abs(line.dominantSize - bodySize) < 0.5) {
+          if (prevTop !== null) {
+            const gap = line.top - prevTop;
+            if (gap > 0 && gap < 100) bodyGaps.push(gap);
+          }
+          prevTop = line.top;
+        }
+      }
+      bodyGaps.sort((a, b) => a - b);
+      const medianGap = bodyGaps.length > 0
+        ? bodyGaps[Math.floor(bodyGaps.length / 2)]
+        : 14.0;
+      const paraBreakThreshold = medianGap * 1.8;
+
+      // Determine left margin for bullet detection
+      const bodyLineX0s = [];
+      for (const line of lines) {
+        if (Math.abs(line.dominantSize - bodySize) < 1.0 && line.dominantSize > 1.0) {
+          bodyLineX0s.push(Math.round(line.x0));
+        }
+      }
+      const x0Counts = {};
+      for (const x of bodyLineX0s) {
+        x0Counts[x] = (x0Counts[x] || 0) + 1;
+      }
+      const qualified = Object.entries(x0Counts)
+        .filter(([, cnt]) => cnt >= 2)
+        .map(([x]) => +x)
+        .sort((a, b) => a - b);
+      const leftMargin = qualified.length > 0
+        ? qualified[0]
+        : (bodyLineX0s.length > 0 ? Math.min(...bodyLineX0s) : 0);
+      const bulletIndentThreshold = 10;
+
+      // Classify each line
+      const outputParts = [];
+      prevTop = null;
+
+      for (const line of lines) {
+        const size = line.dominantSize;
+        const font = line.dominantFont;
+        const text = line.text;
+        const isBold = line.isBold;
+        const isSans = line.isSans || /sans|helvetica|arial/i.test(font);
+        const lineX0 = line.x0 || 0;
+
+        // Skip boilerplate (small font)
+        if (size < bodySize * 0.85) { prevTop = line.top; continue; }
+        if (size <= 1.0) { prevTop = line.top; continue; }
+
+        // Skip common page header/footer patterns
+        const stripped = text.trim();
+        if (/^https?:\/\//.test(stripped)) { prevTop = line.top; continue; }
+        if (/^\[.*preprint\]$/i.test(stripped)) { prevTop = line.top; continue; }
+        if (/^.{0,30}(Preprints?|preprints?).{0,30}et\s+al/.test(stripped)) { prevTop = line.top; continue; }
+        if (/^(?:Page\s+)?\d+\s+of\s+\d+$/i.test(stripped)) { prevTop = line.top; continue; }
+
+        // Detect paragraph break from vertical gap
+        if (prevTop !== null) {
+          const gap = line.top - prevTop;
+          if (gap > paraBreakThreshold) {
+            outputParts.push('');
+          }
+        }
+
+        // Check indentation for bullets
+        const isIndented = (lineX0 - leftMargin) >= bulletIndentThreshold;
+
+        // Classify heading level
+        const sizeRatio = bodySize > 0 ? size / bodySize : 1.0;
+
+        if (sizeRatio > 1.35) {
+          // Title
+          outputParts.push(`# ${text}`);
+        } else if (sizeRatio > 1.1 || (isBold && isSans && bodyIsSerif)) {
+          // Section heading
+          outputParts.push(`## ${text}`);
+        } else if (isIndented) {
+          // Bullet point
+          const formatted = formatInlineSpans(line.spans, bodyFont, bodySize);
+          outputParts.push(`- ${formatted}`);
+        } else if (isBold && text.length < 80) {
+          // Potential subheading
+          const allBold = line.spans.every(s => !s.text.trim() || s.isBold);
+          const looksLikeHeading = (
+            allBold
+            && text.split(/\s+/).length <= 12
+            && !text.trimEnd().endsWith(',')
+            && !text.trimEnd().endsWith(';')
+            && !/\b(and|the|a|an|of|in|to|its|with|for|or)\s*$/i.test(text.trimEnd())
+          );
+          if (looksLikeHeading) {
+            outputParts.push(`### ${text}`);
+          } else {
+            outputParts.push(formatInlineSpans(line.spans, bodyFont, bodySize));
+          }
+        } else {
+          // Regular body text
+          outputParts.push(formatInlineSpans(line.spans, bodyFont, bodySize));
+        }
+
+        prevTop = line.top;
+      }
+
+      // Post-processing: merge multi-line headings and bullet continuations
+      const merged = [];
+      for (const part of outputParts) {
+        if (!merged.length) { merged.push(part); continue; }
+
+        // Merge consecutive heading lines at same level
+        if (part.startsWith('#')) {
+          const curMatch = part.match(/^(#{1,6})\s+(.*)/);
+          const prevMatch = merged[merged.length - 1].match(/^(#{1,6})\s+(.*)/);
+          if (curMatch && prevMatch && curMatch[1] === prevMatch[1]) {
+            merged[merged.length - 1] = `${prevMatch[1]} ${prevMatch[2]} ${curMatch[2]}`;
+            continue;
+          }
+        }
+
+        // Merge bullet continuation lines
+        if (part.startsWith('- ') && merged[merged.length - 1].startsWith('- ')
+          && !/^- \*\*/.test(part) && !/^- \d/.test(part)) {
+          merged[merged.length - 1] += ' ' + part.slice(2);
+          continue;
+        }
+
+        merged.push(part);
+      }
+
+      return merged.join('\n');
+    }
+
+    // -------------------------------------------------------------------------
+    // Format inline bold / italic spans
+    // -------------------------------------------------------------------------
+
+    function formatInlineSpans(spans, bodyFont, bodySize) {
+      const bodyIsBold = /bold/i.test(bodyFont);
+      const bodyIsItalic = /italic|oblique/i.test(bodyFont);
+
+      const parts = [];
+      for (const span of spans) {
+        const text = span.text;
+        if (!text.trim()) { parts.push(text); continue; }
+
+        const isBold = span.isBold;
+        const isItalic = span.isItalic;
+        let formatted;
+
+        if (isBold && isItalic && !(bodyIsBold && bodyIsItalic)) {
+          formatted = `***${text.trim()}***`;
+        } else if (isBold && !bodyIsBold) {
+          formatted = `**${text.trim()}**`;
+        } else if (isItalic && !bodyIsItalic) {
+          formatted = `*${text.trim()}*`;
+        } else {
+          formatted = text;
+        }
+
+        // Prevent marker collision: if previous part ends with * and this starts with *
+        // insert a space between them
+        if (parts.length > 0 && formatted.startsWith('*')) {
+          const prev = parts[parts.length - 1];
+          if (prev.endsWith('*')) {
+            parts.push(' ');
+          }
+        }
+        parts.push(formatted);
+      }
+      return parts.join('').trim();
+    }
+
+    // =========================================================================
+    // DOCX extraction (via mammoth.js)
+    // =========================================================================
+
+    async function extractDOCX(arrayBuffer) {
+      const result = await mammoth.convertToHtml({ arrayBuffer });
+      return htmlToMarkdown(result.value);
+    }
+
+    function htmlToMarkdown(html) {
+      html = html.replace(/\r/g, '');
+      html = html.replace(/<(\/?)(?:p|div|section)[^>]*>/gi, '\n\n');
+      html = html.replace(/<br\s*\/?>/gi, '\n');
+      html = html.replace(/<h([1-6])[^>]*>(.*?)<\/h\1>/gis,
+        (_, level, content) => '#'.repeat(+level) + ' ' + content.trim() + '\n\n');
+      html = html.replace(/<li[^>]*>(.*?)<\/li>/gis, '- $1\n');
+      html = html.replace(/<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)<\/a>/gis, '[$2]($1)');
+      html = html.replace(/<(?:strong|b)>/gi, '**');
+      html = html.replace(/<\/(?:strong|b)>/gi, '**');
+      html = html.replace(/<(?:em|i)>/gi, '*');
+      html = html.replace(/<\/(?:em|i)>/gi, '*');
+      html = html.replace(/<[^>]+>/g, '');
+      html = html.replace(/\n{3,}/g, '\n\n');
+      return html.trim();
+    }
+
+    // =========================================================================
+    // Text normalisation
+    // =========================================================================
+
+    function normalizeText(text) {
+      // Clean up repeated characters (except in tables/headings)
+      const rawLines = text.split('\n');
+      const cleanedLines = rawLines.map(line => {
+        const stripped = line.trim();
+        if (stripped.startsWith('|') || /^#{1,6}\s/.test(stripped)) return line;
+        return deduplicateRepeatedChars(line);
+      });
+      text = cleanedLines.join('\n');
+
+      // Ligatures and smart quotes
+      text = text.replace(/\ufb01/g, 'fi').replace(/\ufb02/g, 'fl')
+        .replace(/\ufb00/g, 'ff').replace(/\ufb03/g, 'ffi').replace(/\ufb04/g, 'ffl');
+      text = text.replace(/\u201c/g, '"').replace(/\u201d/g, '"')
+        .replace(/\u2018/g, "'").replace(/\u2019/g, "'");
+      text = text.replace(/\u2013/g, '-').replace(/\u2014/g, '-')
+        .replace(/\u2026/g, '...');
+
+      // Hyphenated line breaks
+      text = text.replace(/(\w)-\n(\w)/g, '$1$2');
+      text = text.replace(/\r\n?|\r/g, '\n');
+      // Remove standalone page numbers
+      text = text.replace(/(?:^|\n)\s*\d+\s*(?:\n|$)/g, '\n');
+      // Remove page footer/header boilerplate
+      text = text.replace(/^.*Page\s+\d+\s+of\s+\d+\s*$/gm, '');
+      text = text.replace(/^\s*v\d+\.\d+\s*[-\u2013]\s*\d+.*$/gm, '');
+      text = text.replace(/^(?:CONFIDENTIAL\s*[-\u2013]\s*\S+(?:\s+\S+){0,3}\s+)/gm, '');
+
+      // Deduplicate consecutive identical lines
+      const lines = [];
+      let previous = null;
+      for (const raw of text.split('\n')) {
+        const line = raw.trimEnd();
+        if (line === previous) continue;
+        lines.push(line);
+        previous = line;
+      }
+
+      // Build blocks — preserve headings, bullets, tables as standalone
+      const blocks = [];
+      let buffer = [];
+
+      for (const line of lines) {
+        const stripped = line.trim();
+        if (stripped === '') {
+          if (buffer.length) { blocks.push(buffer); buffer = []; }
+          blocks.push('');
+        } else if (stripped.startsWith('|')) {
+          if (buffer.length) { blocks.push(buffer); buffer = []; }
+          blocks.push(line);
+        } else if (/^#{1,6}\s/.test(stripped)) {
+          if (buffer.length) { blocks.push(buffer); buffer = []; }
+          blocks.push(line);
+        } else if (stripped.startsWith('- ')) {
+          if (buffer.length) { blocks.push(buffer); buffer = []; }
+          blocks.push(line);
+        } else {
+          buffer.push(line);
+        }
+      }
+      if (buffer.length) blocks.push(buffer);
+
+      // Format blocks
+      const formatted = [];
+      for (const block of blocks) {
+        if (block === '') { formatted.push(''); continue; }
+        if (typeof block === 'string') { formatted.push(block); continue; }
+        // Merge body text lines into a paragraph
+        const merged = block.filter(l => l.trim()).join(' ');
+        formatted.push(merged);
+      }
+
+      // Join with blank lines between blocks, single newlines for table rows
+      let result = '';
+      for (let i = 0; i < formatted.length; i++) {
+        if (i === 0) {
+          result = formatted[i];
+        } else if (formatted[i].trim().startsWith('|')) {
+          result += '\n' + formatted[i];
+        } else {
+          result += '\n\n' + formatted[i];
+        }
+      }
+
+      result = result.replace(/\n{3,}/g, '\n\n');
+      return result.trim();
+    }
+
+    // =========================================================================
+    // UI
+    // =========================================================================
+
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('file-input');
+    const fileInfo = document.getElementById('file-info');
+    const output = document.getElementById('markdown-output');
+    const message = document.getElementById('message');
+    const conversionMethod = document.getElementById('conversion-method');
+    const loadingIndicator = document.getElementById('loading-indicator');
+    const downloadButton = document.getElementById('download-button');
+    const copyButton = document.getElementById('copy-button');
+    const togglePreview = document.getElementById('toggle-preview');
+    const previewOutput = document.getElementById('preview-output');
+    let currentFilename = 'output.md';
+    let isPreview = false;
+
+    function setStatus(text) { message.textContent = text; }
+
+    function setSource(text) {
+      conversionMethod.textContent = text ? `Source: ${text}` : '';
+      conversionMethod.classList.toggle('warning', text === 'Scanned (no OCR)');
+    }
+
+    function setLoading(loading) {
+      loadingIndicator.classList.toggle('visible', loading);
+      dropzone.classList.toggle('loading', loading);
+    }
+
+    function setDownloading(enabled) {
+      downloadButton.disabled = !enabled;
+      copyButton.disabled = !enabled;
+      togglePreview.disabled = !enabled;
+    }
+
+    function toggleView() {
+      isPreview = !isPreview;
+      if (isPreview) {
+        previewOutput.innerHTML = marked.parse(output.value);
+        output.style.display = 'none';
+        previewOutput.style.display = 'block';
+        togglePreview.textContent = 'Raw';
+      } else {
+        output.style.display = 'block';
+        previewOutput.style.display = 'none';
+        togglePreview.textContent = 'Preview';
+      }
+    }
+
+    function formatFileSize(bytes) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    function validateFile(file) {
+      if (!file) return null;
+      const allowedExtensions = ['.pdf', '.docx'];
+      const fileName = file.name.toLowerCase();
+      if (!allowedExtensions.some(ext => fileName.endsWith(ext))) {
+        return 'Unsupported file type. Please select a PDF or DOCX file.';
+      }
+      if (file.size > 50 * 1024 * 1024) {
+        return 'File is too large. Please select a file smaller than 50MB.';
+      }
+      return null;
+    }
+
+    function updateFileInfo(file) {
+      if (!file) {
+        fileInfo.hidden = true;
+        fileInfo.textContent = '';
+        fileInfo.classList.remove('error');
+        return;
+      }
+      const error = validateFile(file);
+      if (error) {
+        fileInfo.textContent = error;
+        fileInfo.classList.add('error');
+        fileInfo.hidden = false;
+      } else {
+        fileInfo.textContent = `${file.name} (${formatFileSize(file.size)})`;
+        fileInfo.classList.remove('error');
+        fileInfo.hidden = false;
+      }
+    }
+
+    async function convertFile(file) {
+      const error = validateFile(file);
+      if (error) { setStatus(error); return; }
+
+      setStatus('Converting... please wait.');
+      setSource('');
+      setDownloading(false);
+      setLoading(true);
+
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const fileName = file.name.toLowerCase();
+        let markdown, sourceType;
+
+        if (fileName.endsWith('.docx')) {
+          markdown = await extractDOCX(arrayBuffer);
+          sourceType = 'DOCX';
+        } else {
+          markdown = await extractPDF(arrayBuffer);
+          // Check if we got meaningful text
+          const words = markdown.replace(/[^A-Za-z0-9]+/g, '');
+          if (words.length < 30) {
+            sourceType = 'Scanned (no OCR)';
+            setStatus('This appears to be a scanned PDF. Client-side OCR is not available — use the server version for OCR support.');
+          } else {
+            sourceType = 'Embedded text';
+          }
+        }
+
+        output.value = markdown;
+        currentFilename = file.name.replace(/\.[^.]+$/, '') + '.md';
+        setDownloading(true);
+        setSource(sourceType);
+        if (isPreview) {
+          previewOutput.innerHTML = marked.parse(output.value);
+        }
+        if (sourceType !== 'Scanned (no OCR)') {
+          setStatus('Conversion complete. Review the markdown and download it if you like.');
+        }
+      } catch (err) {
+        console.error(err);
+        output.value = '';
+        setDownloading(false);
+        setSource('');
+        setStatus('Conversion failed: ' + err.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    function downloadMarkdown() {
+      const blob = new Blob([output.value], { type: 'text/markdown;charset=utf-8' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = currentFilename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
+
+    // Event listeners
+    dropzone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files[0];
+      updateFileInfo(file);
+      if (file && !validateFile(file)) convertFile(file);
+    });
+
+    dropzone.addEventListener('dragover', e => {
+      e.preventDefault();
+      dropzone.classList.add('hover');
+    });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('hover'));
+    dropzone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropzone.classList.remove('hover');
+      const file = e.dataTransfer.files[0];
+      if (file) {
+        fileInput.files = e.dataTransfer.files;
+        updateFileInfo(file);
+        if (!validateFile(file)) convertFile(file);
+      }
+    });
+
+    copyButton.addEventListener('click', () => {
+      navigator.clipboard.writeText(output.value)
+        .then(() => setStatus('Markdown copied to clipboard.'))
+        .catch(() => setStatus('Copy failed. Please try again.'));
+    });
+
+    downloadButton.addEventListener('click', downloadMarkdown);
+    togglePreview.addEventListener('click', toggleView);
+
+    // Expose for testing
+    window.convertFile = convertFile;
+    window.extractPDF = extractPDF;
+  </script>
+</body>
+
+</html>
